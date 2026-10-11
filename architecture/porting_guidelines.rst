@@ -32,11 +32,12 @@ setup involve configuring UART, memory addresses etc. For simplicity let us call
 our fictive platform for "gendev" just so we have something to refer to when
 writing examples further down.
 
-core/arch/arm
-=================
-In ``core/arch/arm`` you will find all the currently supported devices. That is
-where you are supposed to add a new platform or modify an existing one.
-Typically you will find this set of files in a specific platform folder:
+core/arch/<arch>
+================
+In ``core/arch/arm`` and ``core/arch/riscv`` you will find all the currently
+supported devices. That is where you are supposed to add a new platform or
+modify an existing one. Typically you will find this set of files in a specific
+platform folder:
 
 .. code-block:: bash
 
@@ -66,146 +67,151 @@ your platform. This mainly comprises two things:
   see :ref:`configuration_and_flags` and similar sections on that page.
 
 It is recommended to use a existing platform configuration file as a starting
-point. For instance, `core/arch/arm/plat-hikey/conf.mk`_.
+point. For instance, `core/arch/arm/plat-hikey/conf.mk`_ or
+``core/arch/arm/plat-rpi3/conf.mk``.
 
 The platform ``conf.mk`` file should at least define the default platform flavor
-for the platform, the core configurations (architecture and number of cores),
-the main configuration directives (generic boot, arm trusted firmware support,
-generic time source, console driver, etc...) and some platform default
-configuration settings.
+for the platform, the CPU configuration (by including a file from
+``core/arch/arm/cpu``) and the number of cores, the console driver, the secure
+time source, whether OP-TEE runs together with Trusted Firmware A, and the
+secure memory and static shared memory locations:
 
 .. code-block:: make
 
-    PLATFORM_FLAVOR ?= hikey
-    
+    PLATFORM_FLAVOR ?= gendev
+
     include core/arch/arm/cpu/cortex-armv8-0.mk
-    
-    $(call force,CFG_TEE_CORE_NB_CORE,8)
-    $(call force,CFG_GENERIC_BOOT,y)
-    $(call force,CFG_PL011,y)
-    $(call force,CFG_PM_STUBS,y)
+
+    $(call force,CFG_TEE_CORE_NB_CORE,4)
+    $(call force,CFG_8250_UART,y)
     $(call force,CFG_SECURE_TIME_SOURCE_CNTPCT,y)
     $(call force,CFG_WITH_ARM_TRUSTED_FW,y)
-    $(call force,CFG_WITH_LPAE,y)
-    
-    ta-targets = ta_arm32
-    ta-targets += ta_arm64
-    
-    CFG_NUM_THREADS ?= 8
+    $(call force,CFG_GIC,y)
+
+    CFG_NUM_THREADS ?= 4
     CFG_CRYPTO_WITH_CE ?= y
-    CFG_WITH_STACK_CANARIES ?= y
-    CFG_CONSOLE_UART ?= 3
-    CFG_DRAM_SIZE_GB ?= 2
+
+    # Secure memory used by OP-TEE (TEE core and TA RAM)
+    CFG_TZDRAM_START ?= 0x60000000
+    CFG_TZDRAM_SIZE ?= 0x02000000
+    # Non-secure static shared memory
+    CFG_SHMEM_START ?= 0x08000000
+    CFG_SHMEM_SIZE ?= 0x00400000
+    # Optional: size of the TEE core part of CFG_TZDRAM
+    CFG_TEE_RAM_VA_SIZE ?= 0x00400000
+
+``CFG_TZDRAM_START``, ``CFG_TZDRAM_SIZE``, ``CFG_SHMEM_START`` and
+``CFG_SHMEM_SIZE`` are mandatory when ``platform_config.h`` includes
+``mm/generic_ram_layout.h`` (see below).
 
 **main.c**
 
-This platform specific file will contain power management handlers and code
-related to the UART. We will talk more about the information related to the
-handlers further down in this document. For our gendev device it could look like
-this (here we are excluding the necessary license header to save some space):
+This platform specific file contains the registration of the memory areas that
+OP-TEE needs to map, the console initialization and, if the platform has an
+interrupt controller, its initialization. For our gendev device it could look
+like this (here we are excluding the necessary license header to save some
+space):
 
 .. code-block:: c
 
     #include <console.h>
+    #include <drivers/gic.h>
     #include <drivers/serial8250_uart.h>
-    #include <kernel/generic_boot.h>
-    #include <kernel/panic.h>
-    #include <kernel/pm_stubs.h>
+    #include <kernel/boot.h>
     #include <mm/core_mmu.h>
     #include <platform_config.h>
-    #include <stdint.h>
-    #include <tee/entry_fast.h>
-    #include <tee/entry_std.h>
-    
-    static void main_fiq(void)
-    {
-    	panic();
-    }
-    
-    static const struct thread_handlers handlers = {
-    	.std_smc = tee_entry_std,
-    	.fast_smc = tee_entry_fast,
-    	.nintr = main_fiq,
-    	.cpu_on = cpu_on_handler,
-    	.cpu_off = pm_do_nothing,
-    	.cpu_suspend = pm_do_nothing,
-    	.cpu_resume = pm_do_nothing,
-    	.system_off = pm_do_nothing,
-    	.system_reset = pm_do_nothing,
-    };
-    
-    const struct thread_handlers *generic_boot_get_handlers(void)
-    {
-    	return &handlers;
-    }
-    
-    /*
-     * Register the physical memory area for peripherals etc. Here we are
-     * registering the UART console.
-     */
-    register_phys_mem(MEM_AREA_IO_NSEC, CONSOLE_UART_BASE, SERIAL8250_UART_REG_SIZE);
-    
+
     static struct serial8250_uart_data console_data;
-    
-    void console_init(void)
+
+    /* Peripherals that OP-TEE maps */
+    register_phys_mem_pgdir(MEM_AREA_IO_NSEC, CONSOLE_UART_BASE,
+                            SERIAL8250_UART_REG_SIZE);
+    register_phys_mem_pgdir(MEM_AREA_IO_SEC, GICD_BASE, GIC_DIST_REG_SIZE);
+    register_phys_mem_pgdir(MEM_AREA_IO_SEC, GICC_BASE, GIC_CPU_REG_SIZE);
+
+    /* Non-secure DDR, used for dynamic shared memory */
+    register_ddr(DRAM0_BASE, DRAM0_SIZE);
+
+    void plat_console_init(void)
     {
     	serial8250_uart_init(&console_data, CONSOLE_UART_BASE,
     			     CONSOLE_UART_CLK_IN_HZ, CONSOLE_BAUDRATE);
     	register_serial_console(&console_data.chip);
     }
 
+    void boot_primary_init_intc(void)
+    {
+    	gic_init(GICC_BASE, GICD_BASE);
+    }
+
+    void boot_secondary_init_intc(void)
+    {
+    	gic_init_per_cpu();
+    }
+
+The functions above override weak default implementations:
+
+- ``plat_console_init()`` (``core/kernel/console.c``) sets up the secure
+  console.
+- ``boot_primary_init_intc()`` and ``boot_secondary_init_intc()``
+  (``core/arch/arm/kernel/boot.c``) initialize the interrupt controller on the
+  primary core and on each secondary core. On GICv3 ``gic_init_v3()`` is used
+  instead of ``gic_init()``.
+
+``register_phys_mem_pgdir()`` and ``register_ddr()`` are defined in
+``core/include/mm/core_mmu.h``. ``register_ddr()`` describes the non-secure DDR.
+OP-TEE accepts the parts of it that do not overlap with secure memory as
+non-secure shared memory. As an alternative, the memory can be described by
+the device tree that is passed to OP-TEE (see :ref:`device_tree`).
+
 **platform_config.h**
 
 This is a mandatory header file for every platform, since there are several
-files relying upon the existence of this particular file. This file is where
-you will find the major differences between different platforms, since this is
-where you do the memory configuration, define base addresses etc. we are going
-to list a few here, but it probably makes more sense to have a look at the
-already existing ``platform_config.h`` files for the other platforms. Our
-fictive gendev could look like this:
+files relying upon the existence of this particular file. It defines base
+addresses of peripherals, clocks and memory that are not configured in
+``conf.mk``. Most platforms include ``mm/generic_ram_layout.h``, which derives
+the memory layout macros (``TEE_RAM_START``, ``TA_RAM_START``,
+``TEE_SHMEM_START`` and others) from the ``CFG_TZDRAM_*`` and ``CFG_SHMEM_*``
+values in ``conf.mk``. The header file documents the resulting layout, with and
+without ``CFG_WITH_PAGER``. Our fictive gendev could look like this:
 
 .. code-block:: c
 
     #ifndef PLATFORM_CONFIG_H
     #define PLATFORM_CONFIG_H
-    
+
+    #include <mm/generic_ram_layout.h>
+
     /* Make stacks aligned to data cache line length */
     #define STACK_ALIGNMENT		64
-    
+
     /* 8250 UART */
     #define CONSOLE_UART_BASE	0xcafebabe /* UART0 */
     #define CONSOLE_BAUDRATE	115200
     #define CONSOLE_UART_CLK_IN_HZ	19200000
-    
-    /* Optional: when used with CFG_WITH_PAGER, defines the device SRAM */
-    #define TZSRAM_BASE		0x3F000000
-    #define TZSRAM_SIZE		(200 * 1024)
-    
-    /* Mandatory main secure RAM usually DDR */
-    #define TZDRAM_BASE		0x60000000
-    #define TZDRAM_SIZE		(32 * 1024 * 1024)
-    
-    /* Mandatory TEE RAM location and core load address */
-    #define TEE_RAM_START		TZDRAM_BASE
-    #define TEE_RAM_PH_SIZE		TEE_RAM_VA_SIZE
-    #define TEE_RAM_VA_SIZE		(4 * 1024 * 1024)
-    #define TEE_LOAD_ADDR		(TZDRAM_BASE + 0x20000)
-    
-    /* Mandatory TA RAM (external less secure RAM) */
-    #define TA_RAM_START		(TZDRAM_BASE + TEE_RAM_VA_SIZE)
-    #define TA_RAM_SIZE		(TZDRAM_SIZE - TEE_RAM_VA_SIZE)
-    
-    /* Mandatory: for static SHM, need a hardcoded physical address */
-    #define TEE_SHMEM_START		0x08000000
-    #define TEE_SHMEM_SIZE		(4 * 1024 * 1024)
-    
+
+    /* GIC */
+    #define GICD_BASE		0x2f000000
+    #define GICC_BASE		0x2c000000
+
+    /* Non-secure DDR */
+    #define DRAM0_BASE		0x40000000
+    #define DRAM0_SIZE		0x80000000
+
     #endif /* PLATFORM_CONFIG_H */
 
-This is minimal amount of information in the ``platform_config.h`` file. I.e,
-the memory layout for on-chip and external RAM. Note that parts of the DDR
-typically will need to be shared with normal world, so there is need for some
-kind of memory firewall for this (more about that further down). As you can see
-we have also added the UART configuration here, i.e., the ``DEVICE0_xyz`` part.
+Note that parts of the DDR typically will need to be shared with normal world,
+so there is need for some kind of memory firewall for this (more about that
+further down).
+
+**sub.mk**
+
+This file lists the source files of the platform and the include directories:
+
+.. code-block:: make
+
+    global-incdirs-y += .
+    srcs-y += main.c
 
 Binaries
 ========
@@ -291,7 +297,7 @@ existing entry:
 
 If you are submitting the board support upstream we are going to ask you to
 become the maintainer for the device you have added. This means that you should
-also update the MAINTAINERS.md_ file accordingly. By being a maintainer for a
+also update the MAINTAINERS_ file accordingly. By being a maintainer for a
 device you are responsible to keep it up to date and you will be asked every
 quarter as part of the OP-TEE release schedule to test your device running the
 latest OP-TEE software.
@@ -589,36 +595,39 @@ development configuration, for example in CI.
 
 Power Management / PSCI
 ***********************
-In the :ref:`add_a_new_platform` section where we talked about the file
-``main.c``, we added a couple of handlers related to power management, we are
-talking about the following lines:
+How power management requests reach OP-TEE depends on whether OP-TEE runs
+together with Trusted Firmware A:
 
-.. code-block:: c
+- With ``CFG_WITH_ARM_TRUSTED_FW=y``, TF-A implements PSCI and forwards the
+  CPU and system power events to OP-TEE. A secondary core enters OP-TEE through
+  ``cpu_on_handler``, which calls ``boot_cpu_on_handler()``. The other events
+  are handled by ``thread_cpu_off_handler()``, ``thread_cpu_suspend_handler()``,
+  ``thread_cpu_resume_handler()``, ``thread_system_off_handler()`` and
+  ``thread_system_reset_handler()``. Their weak default implementations in
+  ``core/arch/arm/kernel/thread.c`` return ``0`` without doing anything.
+- With ``CFG_WITH_ARM_TRUSTED_FW=n`` (Armv7-A), OP-TEE contains the secure
+  monitor and implements PSCI itself. The platform implements the PSCI functions
+  it supports (``psci_cpu_on()``, ``psci_cpu_suspend()``,
+  ``psci_system_suspend()`` and others), which have weak default
+  implementations in ``core/arch/arm/sm/psci.c``.
 
-    .cpu_on = cpu_on_handler,
-    .cpu_off = pm_do_nothing,
-    .cpu_suspend = pm_do_nothing,
-    .cpu_resume = pm_do_nothing,
-    .system_off = pm_do_nothing,
-    .system_reset = pm_do_nothing,
-
-The only function that actually does something there is the ``cpu_on`` function,
-the rest of them are stubbed. The main reason for that is because we think that
-how to suspend and resume is a device dependent thing. The code in OP-TEE is
-prepared so that callbacks etc from Trusted Firmware A will be routed to OP-TEE,
-but since the function(s) are just stubbed we will not do anything and just
-return. In a real production device, you would probably want to save and restore
-CPU states, secure hardware IPs' registers and TZASC and other memory firewall
-related setting when these callbacks are being called.
+Drivers and core services register suspend and resume callbacks with
+``register_pm_driver_cb()`` and ``register_pm_core_service_cb()``
+(``core/include/kernel/pm.h``). The callbacks are called with ``PM_OP_SUSPEND``
+or ``PM_OP_RESUME`` when the platform calls ``pm_change_state()``. The weak
+default handlers do not call ``pm_change_state()``, so a platform that wants
+the registered callbacks to run calls it from its own handlers. Examples are
+``core/arch/arm/plat-stm32mp2/stm32mp_pm.c`` and
+``core/drivers/pm/sam/at91_pm.c``.
 
 A TZASC or bus firewall that is not in an always-on power domain loses its
 configuration on suspend-to-RAM, and must be reconfigured on resume. For
-example, on i.MX 8M the TZASC is not in an always-on power domain and OP-TEE
-reconfigures it from a ``PM_OP_RESUME`` callback in
-``core/arch/arm/plat-imx/tzc380.c``. Per-core secure configuration must also be
-applied when secondary cores are brought up. Secure SRAM/OCRAM that holds stacks
-or keys can be left readable across low-power states if it is not cleared or
-protected. These paths are not covered by a cold boot test.
+example, the comment in ``core/arch/arm/plat-imx/tzc380.c`` states that the
+TZASC is not part of an always-on power domain on i.MX 8M, and the driver
+registers a resume callback that reconfigures it. Per-core secure configuration
+must also be applied when secondary cores are brought up. Secure SRAM/OCRAM that
+holds stacks or keys can be left readable across low-power states if it is not
+cleared or protected. These paths are not covered by a cold boot test.
 
 Memory firewalls / TZASC
 ************************
@@ -828,7 +837,7 @@ The following checklist summarizes the topics in this document.
 
 .. _auth-framework.rst: https://github.com/ARM-software/arm-trusted-firmware/blob/master/docs/design/auth-framework.rst
 .. _HSM: https://en.wikipedia.org/wiki/Hardware_security_module
-.. _MAINTAINERS.md: https://github.com/OP-TEE/optee_os/blob/master/MAINTAINERS
+.. _MAINTAINERS: https://github.com/OP-TEE/optee_os/blob/master/MAINTAINERS
 .. _OTP: https://en.wikipedia.org/wiki/Programmable_read-only_memory
 .. _plat_arm_security_setup: https://github.com/ARM-software/arm-trusted-firmware/search?utf8=%E2%9C%93&q=plat_arm_security_setup&type=
 .. _TZC-380: http://infocenter.arm.com/help/index.jsp?topic=/com.arm.doc.ddi0431c/index.html

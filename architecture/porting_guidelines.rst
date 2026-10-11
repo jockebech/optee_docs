@@ -38,20 +38,18 @@ supported by OP-TEE are:
 - **With Trusted Firmware A** (``CFG_WITH_ARM_TRUSTED_FW=y``). OP-TEE is the
   BL32 image loaded by TF-A, and TF-A runs the secure monitor at EL3. TF-A is
   built with ``SPD=opteed`` for the OP-TEE SMC ABI.
-- **With FF-A**. OP-TEE runs as a Secure Partition Manager Core at S-EL1
-  (``CFG_CORE_SEL1_SPMC=y``, TF-A built with ``SPD=spmd`` and
-  ``SPMD_SPM_AT_SEL2=0``), as a secure partition under an SPMC at S-EL2 such as
-  Hafnium (``CFG_CORE_SEL2_SPMC=y``), or together with the TF-A EL3 SPMC
-  (``CFG_CORE_EL3_SPMC=y``). See :doc:`spmc`.
+- **With FF-A**. OP-TEE runs as the Secure Partition Manager Core (SPMC) at
+  S-EL1 (``CFG_CORE_SEL1_SPMC=y``), as a secure partition under an SPMC at
+  S-EL2 such as Hafnium (``CFG_CORE_SEL2_SPMC=y``), or together with the TF-A
+  EL3 SPMC (``CFG_CORE_EL3_SPMC=y``). See :doc:`spmc`.
 - **Without Trusted Firmware A** on Armv7-A (``CFG_WITH_ARM_TRUSTED_FW=n``).
   OP-TEE contains the secure monitor and implements PSCI itself (see
   :ref:`porting_power_management`).
 
-``boot_save_args()`` in ``core/arch/arm/kernel/boot.c`` documents the boot
-arguments that OP-TEE expects in each of these cases. For example, when OP-TEE
-is not an SPMC at S-EL2, the third argument holds the address of the system
-device tree if it is non-zero. The binaries that the boot loader loads are
-described in :ref:`porting_binaries`.
+The boot loader passes boot arguments to OP-TEE, for example the address of
+the device tree. Which arguments are used depends on the configuration above.
+The binaries that the boot loader loads are described in
+:ref:`porting_binaries`.
 
 Things to have at hand before starting:
 
@@ -108,8 +106,7 @@ your platform. This mainly comprises two things:
   see :ref:`configuration_and_flags` and similar sections on that page.
 
 It is recommended to use a existing platform configuration file as a starting
-point. For instance, `core/arch/arm/plat-hikey/conf.mk`_ or
-``core/arch/arm/plat-rpi3/conf.mk``.
+point. For instance, `core/arch/arm/plat-hikey/conf.mk`_.
 
 The platform ``conf.mk`` file should at least define the default platform flavor
 for the platform, the CPU configuration (by including a file from
@@ -148,22 +145,17 @@ secure memory and static shared memory locations:
 ``CFG_SHMEM_SIZE`` are mandatory when ``platform_config.h`` includes
 ``mm/generic_ram_layout.h`` (see below).
 
-The console driver is selected with a driver option. ``core/drivers/sub.mk``
-lists the UART drivers, for example ``CFG_PL011``, ``CFG_8250_UART``,
-``CFG_16550_UART``, ``CFG_CDNS_UART``, ``CFG_IMX_UART`` and ``CFG_STM32_UART``.
+The console driver is selected with the ``CFG_`` option of the UART driver,
+``CFG_8250_UART`` in the example. The UART drivers and their options are listed
+in ``core/drivers/sub.mk``.
 
 A platform can also define its own configuration options. ``CFG_CONSOLE_UART``
-in the example is such an option: it is not defined in ``mk/config.mk``, and
-the platform's ``platform_config.h`` uses it to select the base address of the
-UART that is used as console. ``plat-hikey``, ``plat-k3`` and ``plat-versal2``
-use this pattern. In the same way ``plat-hikey`` and ``plat-poplar`` define
-``CFG_DRAM_SIZE_GB`` to select the DRAM size of the board variant.
+in the example is such an option: it is not a generic OP-TEE option, and the
+platform's ``platform_config.h`` uses it to select the base address of the UART
+that is used as console.
 
-Some options do not have to be set in the platform ``conf.mk``:
-``CFG_WITH_LPAE`` is forced to ``y`` for 64-bit cores in
-``core/arch/arm/arm.mk``, ``arm.mk`` derives the TA targets (``ta_arm32``,
-``ta_arm64``) from the core architecture unless the platform sets
-``supported-ta-targets``, and ``CFG_WITH_STACK_CANARIES`` defaults to ``y``.
+Many options have defaults in ``mk/config.mk`` or are derived from the CPU
+architecture, and do not have to be set in the platform ``conf.mk``.
 
 **main.c**
 
@@ -212,18 +204,17 @@ space):
 
 The functions above override weak default implementations:
 
-- ``plat_console_init()`` (``core/kernel/console.c``) sets up the secure
-  console.
-- ``boot_primary_init_intc()`` and ``boot_secondary_init_intc()``
-  (``core/arch/arm/kernel/boot.c``) initialize the interrupt controller on the
-  primary core and on each secondary core. On GICv3 ``gic_init_v3()`` is used
-  instead of ``gic_init()``.
+- ``plat_console_init()`` sets up the secure console (see
+  :ref:`porting_console`).
+- ``boot_primary_init_intc()`` and ``boot_secondary_init_intc()`` initialize
+  the interrupt controller on the primary core and on each secondary core. On
+  GICv3 ``gic_init_v3()`` is used instead of ``gic_init()``.
 
-``register_phys_mem_pgdir()`` and ``register_ddr()`` are defined in
-``core/include/mm/core_mmu.h``. ``register_ddr()`` describes the non-secure DDR.
-OP-TEE accepts the parts of it that do not overlap with secure memory as
-non-secure shared memory. As an alternative, the memory can be described by
-the device tree that is passed to OP-TEE (see :ref:`device_tree`).
+``register_phys_mem_pgdir()`` registers a memory area that OP-TEE maps.
+``register_ddr()`` describes the non-secure DDR. OP-TEE accepts the parts of it
+that do not overlap with secure memory as non-secure shared memory. As an
+alternative, the memory can be described by the device tree that is passed to
+OP-TEE (see :ref:`device_tree`).
 
 **Entry points and handlers**
 
@@ -239,28 +230,24 @@ behavior:
    * - Event
      - Handled by
    * - Standard (yielding) SMC
-     - ``tee_entry_std()`` in ``core/tee/entry_std.c``. It is weak, and an
-       override is expected to call ``__tee_entry_std()`` for the functions it
-       does not handle.
+     - ``tee_entry_std()``. An override calls ``__tee_entry_std()`` for the
+       functions it does not handle.
    * - Fast SMC
-     - ``tee_entry_fast()`` in ``core/arch/arm/tee/entry_fast.c``. It is weak to
-       let platforms add special handling. An override handles its platform
-       specific function IDs and calls ``__tee_entry_fast()`` for the others,
-       see for example ``core/arch/arm/plat-zynq7k/main.c``.
+     - ``tee_entry_fast()``. An override handles its platform specific
+       function IDs and calls ``__tee_entry_fast()`` for the others.
    * - Secure (native) interrupt
-     - ``interrupt_main_handler()``. The interrupt controller driver provides
-       it, for example ``core/drivers/gic.c`` with ``CFG_GIC=y``. The weak
-       default in ``core/kernel/interrupt.c`` panics with ``Secure interrupt
-       handler not defined``. Drivers register handlers for individual
-       interrupts with ``interrupt_add_handler()`` and related functions (see
-       :ref:`interrupt_handling`). ``CFG_CORE_IRQ_IS_NATIVE_INTR`` (default
-       ``n``) selects whether native interrupts are signaled as FIQ or IRQ.
+     - ``interrupt_main_handler()``, provided by the interrupt controller
+       driver, for example the GIC driver (``CFG_GIC=y``). Without it, OP-TEE
+       panics on the first secure interrupt. Drivers register handlers for
+       individual interrupts with ``interrupt_add_handler()`` and related
+       functions (see :ref:`interrupt_handling`).
+       ``CFG_CORE_IRQ_IS_NATIVE_INTR`` selects whether native interrupts are
+       signaled as FIQ or IRQ.
    * - CPU on, off, suspend, resume, system off and reset
      - See :ref:`porting_power_management`.
    * - SMC handled in the secure monitor (``CFG_WITH_ARM_TRUSTED_FW=n``)
-     - ``sm_platform_handler()`` in ``core/arch/arm/sm/sm.c``, called when
-       ``CFG_SM_PLATFORM_HANDLER=y``. The weak default returns
-       ``SM_HANDLER_PENDING_SMC`` so that the SMC is passed on to OP-TEE.
+     - ``sm_platform_handler()``, called when ``CFG_SM_PLATFORM_HANDLER=y``.
+       SMCs that it does not handle are passed on to OP-TEE.
 
 Platform specific SMC functions are reachable from the normal world, see
 :ref:`ree_tee_interface`.
@@ -318,56 +305,36 @@ further down).
 **Memory layout**
 
 The memory layout is set with the following ``conf.mk`` options when
-``platform_config.h`` includes ``mm/generic_ram_layout.h``
-(``core/arch/arm/include/mm/generic_ram_layout.h``). The header file documents
-the resulting layout with and without ``CFG_WITH_PAGER``.
+``platform_config.h`` includes ``mm/generic_ram_layout.h``. The header file
+documents the resulting layout with and without ``CFG_WITH_PAGER``.
 
 .. list-table::
    :header-rows: 1
-   :widths: 30 25 45
+   :widths: 35 65
 
    * - ``conf.mk`` option
-     - Resulting macros
      - Description
    * - ``CFG_TZDRAM_START``, ``CFG_TZDRAM_SIZE`` (mandatory)
-     - ``TZDRAM_BASE``, ``TZDRAM_SIZE``
      - Secure DRAM used by OP-TEE. Without the pager the TEE core is placed at
-       the start of it. The rest of it is used for TA memory.
+       the start of it. The rest of it is used for TA memory, so TA memory does
+       not need a separate definition.
    * - ``CFG_TEE_RAM_VA_SIZE`` (optional)
-     - ``TEE_RAM_VA_SIZE``
-     - Size of the TEE core memory. Defaults to ``CORE_MMU_PGDIR_SIZE``.
-   * - (derived)
-     - ``TEE_RAM_START``, ``TEE_RAM_PH_SIZE``
-     - Start and physical size of the TEE core memory. Without the pager
-       ``TEE_RAM_START`` is ``TZDRAM_BASE`` and ``TEE_RAM_PH_SIZE`` is
-       ``TEE_RAM_VA_SIZE``. With the pager they are ``TZSRAM_BASE`` and
-       ``TZSRAM_SIZE``.
+     - Size of the TEE core memory.
    * - ``CFG_TEE_LOAD_ADDR`` (optional)
-     - ``TEE_LOAD_ADDR``
-     - Load address of the TEE core. If neither ``CFG_TEE_LOAD_ADDR`` nor the
-       platform defines it, ``core/include/mm/core_mmu.h`` sets it to
-       ``TEE_RAM_START``.
+     - Load address of the TEE core. Defaults to the start of the TEE core
+       memory.
    * - ``CFG_TZSRAM_START``, ``CFG_TZSRAM_SIZE`` (optional, pager only)
-     - ``TZSRAM_BASE``, ``TZSRAM_SIZE``
      - On-chip secure SRAM used by the pager. If not set with
-       ``CFG_WITH_PAGER=y``, the SRAM is emulated in the first
-       ``CFG_CORE_TZSRAM_EMUL_SIZE`` bytes (default 448 KiB) of
+       ``CFG_WITH_PAGER=y``, the SRAM is emulated at the start of
        ``CFG_TZDRAM``.
    * - ``CFG_SHMEM_START``, ``CFG_SHMEM_SIZE`` (mandatory)
-     - ``TEE_SHMEM_START``, ``TEE_SHMEM_SIZE``
-     - Non-secure static shared memory, used when
-       ``CFG_CORE_RESERVED_SHM=y`` (the default). Dynamic shared memory
-       (``CFG_CORE_DYN_SHM=y``, the default) uses the non-secure DDR described
-       with ``register_ddr()`` or the device tree instead.
-
-On Arm, the TA memory does not need a separate definition. The header comment
-of ``generic_ram_layout.h`` still lists ``TA_RAM_START`` and ``TA_RAM_SIZE``,
-but the Arm core does not use them: the part of ``CFG_TZDRAM`` that is not used
-by the TEE core is used as secure memory for TAs.
+     - Non-secure static shared memory. Dynamic shared memory uses the
+       non-secure DDR described with ``register_ddr()`` or the device tree
+       instead.
 
 A platform can also define the layout macros by hand in ``platform_config.h``
-instead of including ``mm/generic_ram_layout.h``. For example
-``plat-poplar``, ``plat-sprd``, ``plat-ti`` and ``plat-zynq7k`` do so.
+instead of including ``mm/generic_ram_layout.h``, as some existing platforms
+do.
 
 **sub.mk**
 
@@ -386,20 +353,17 @@ The secure console is the first thing to get working on a new device, since
 the boot log, ``EMSG()``/``IMSG()`` output and abort and panic dumps (see
 :ref:`abort_dumps`) are printed on it.
 
-- ``console_init()`` in ``core/kernel/console.c`` calls ``plat_console_init()``
-  early during boot. The weak default does nothing, so without a platform
-  implementation OP-TEE runs without console output. ``CFG_SEMIHOSTING_CONSOLE``
-  and ``CFG_FFA_CONSOLE`` select other console backends instead of
-  ``plat_console_init()``.
+- ``plat_console_init()`` is called early during boot. The weak default does
+  nothing, so without a platform implementation OP-TEE runs without console
+  output. Other console backends, such as semihosting and the FF-A console, are
+  selected with ``CFG_`` options instead.
 - The console UART must be mapped with ``register_phys_mem_pgdir()``, see
   ``main.c`` above.
-- With ``CFG_DT=y``, ``configure_console_from_dt()`` runs later during boot.
-  It reads ``stdout-path`` from the ``/secure-chosen`` node, or from
-  ``/chosen`` if there is no ``/secure-chosen`` node, and switches the console
-  to that UART if a matching driver is enabled. If the node exists but has no
-  ``stdout-path`` property, OP-TEE prints ``Switching off console`` and turns
-  the console off.
-- ``CFG_TEE_CORE_LOG_LEVEL`` (default ``2``) selects how much is printed (see
+- With ``CFG_DT=y``, OP-TEE later switches the console to the UART given by
+  ``stdout-path`` in the ``/secure-chosen`` node, or in ``/chosen`` if there is
+  no ``/secure-chosen`` node, if a matching driver is enabled. If the node
+  exists but has no ``stdout-path`` property, OP-TEE turns the console off.
+- ``CFG_TEE_CORE_LOG_LEVEL`` selects how much is printed (see
   :ref:`porting_production_build`).
 
 .. _porting_binaries:
@@ -472,26 +436,19 @@ How power management requests reach OP-TEE depends on whether OP-TEE runs
 together with Trusted Firmware A:
 
 - With ``CFG_WITH_ARM_TRUSTED_FW=y``, TF-A implements PSCI and forwards the
-  CPU and system power events to OP-TEE. A secondary core enters OP-TEE through
-  ``cpu_on_handler``, which calls ``boot_cpu_on_handler()``. The other events
-  are handled by ``thread_cpu_off_handler()``, ``thread_cpu_suspend_handler()``,
-  ``thread_cpu_resume_handler()``, ``thread_system_off_handler()`` and
-  ``thread_system_reset_handler()``. Their weak default implementations in
-  ``core/arch/arm/kernel/thread.c`` return ``0`` without doing anything.
+  CPU and system power events to OP-TEE. The platform can override the weak
+  ``thread_cpu_*_handler()`` and ``thread_system_*_handler()`` functions that
+  handle CPU off, suspend and resume, and system off and reset. The defaults do
+  nothing.
 - With ``CFG_WITH_ARM_TRUSTED_FW=n`` (Armv7-A), OP-TEE contains the secure
-  monitor and implements PSCI itself. The platform implements the PSCI functions
-  it supports (``psci_cpu_on()``, ``psci_cpu_suspend()``,
-  ``psci_system_suspend()`` and others), which have weak default
-  implementations in ``core/arch/arm/sm/psci.c``.
+  monitor and implements PSCI itself. The platform implements the ``psci_*()``
+  functions for the PSCI calls it supports.
 
 Drivers and core services register suspend and resume callbacks with
-``register_pm_driver_cb()`` and ``register_pm_core_service_cb()``
-(``core/include/kernel/pm.h``). The callbacks are called with ``PM_OP_SUSPEND``
-or ``PM_OP_RESUME`` when the platform calls ``pm_change_state()``. The weak
-default handlers do not call ``pm_change_state()``, so a platform that wants
-the registered callbacks to run calls it from its own handlers. Examples are
-``core/arch/arm/plat-stm32mp2/stm32mp_pm.c`` and
-``core/drivers/pm/sam/at91_pm.c``.
+``register_pm_driver_cb()`` and ``register_pm_core_service_cb()``. The
+callbacks run when the platform calls ``pm_change_state()``. The default
+handlers do not call it, so a platform that needs the callbacks calls
+``pm_change_state()`` from its own handlers.
 
 .. _porting_device_tree:
 
@@ -500,11 +457,10 @@ Device tree
 OP-TEE can use a device tree in two ways, both enabled with ``CFG_DT=y``
 (default ``n``):
 
-- An external device tree passed by the boot loader (``CFG_EXTERNAL_DT``,
-  which defaults to ``CFG_DT``). OP-TEE adds nodes for the normal world to it,
-  for example a ``firmware/optee`` node with ``compatible = "linaro,optee-tz"``
-  and ``method = "smc"`` when ``CFG_CORE_FFA=n``, and ``reserved-memory`` nodes
-  for the secure memory and the static shared memory.
+- An external device tree passed by the boot loader. OP-TEE adds nodes for
+  the normal world to it, such as the ``linaro,optee-tz`` firmware node when
+  FF-A is not used, and ``reserved-memory`` nodes for the secure memory and the
+  static shared memory.
 - An embedded device tree describing the secure hardware, compiled into the
   core when ``CFG_EMBED_DTB_SOURCE_FILE`` names a DTS file in
   ``core/arch/$(ARCH)/dts``.
@@ -523,10 +479,9 @@ The normal world side of OP-TEE consists of:
   ``linaro,optee-tz`` device tree node, which also selects ``smc`` or ``hvc``
   as the calling method. With FF-A it uses the FF-A transport.
 - ``tee-supplicant`` and ``libteec`` from :ref:`optee_client`.
-  ``tee-supplicant`` loads TAs from the REE file system, by default from
-  ``/lib/optee_armtz``, and serves REE file system requests from OP-TEE. It
-  also serves RPMB requests unless the kernel routes them itself (see
-  ``CFG_RPMB_ANNOUNCE_PROBE_CAP``).
+  ``tee-supplicant`` loads TAs from the REE file system and serves REE file
+  system requests from OP-TEE. It also serves RPMB requests unless the kernel
+  handles them itself.
 
 .. _porting_validation:
 
@@ -537,9 +492,8 @@ the GlobalPlatform APIs and the normal world integration. It requires the
 OP-TEE driver, a running ``tee-supplicant`` and the test TAs installed in the
 TA load path. See :ref:`optee_test_run_xtest` for how to run it.
 
-Some tests use pseudo TAs from ``core/pta/tests``, which are only built with
-``CFG_TEE_CORE_EMBED_INTERNAL_TESTS=y``. That option defaults to
-``CFG_ENABLE_EMBEDDED_TESTS``, which defaults to ``n``.
+Some tests use embedded test pseudo TAs in OP-TEE, which are enabled with
+``CFG_ENABLE_EMBEDDED_TESTS=y``.
 
 ``xtest`` validates functionality. It does not test the security properties
 described in :ref:`porting_production`. When OP-TEE aborts or panics, see
@@ -633,30 +587,28 @@ A port of OP-TEE to a new SoC or board can contain code and configuration
 provided by the vendor. Security critical configuration is spread across several
 components, for example TF-A, U-Boot, OP-TEE, the device tree and fuses.
 
-OP-TEE has a ``CFG_INSECURE`` switch (formerly ``CFG_WARN_INSECURE``, which is
-deprecated). It defaults to ``y`` in ``mk/config.mk``. When it is enabled,
-OP-TEE permits insecure development configurations and prints the following at
-boot (info level):
+OP-TEE has a ``CFG_INSECURE`` switch (formerly ``CFG_WARN_INSECURE``). It
+defaults to ``y``. When it is enabled, OP-TEE permits insecure development
+configurations and prints the following at boot:
 
 .. code-block:: none
 
     WARNING: This OP-TEE configuration might be insecure!
 
-``CFG_INSECURE=y`` has the following effects in the core:
+With ``CFG_INSECURE=y``, OP-TEE provides insecure defaults for functions that a
+product platform must implement:
 
-- The weak default ``tee_otp_get_hw_unique_key()``, which returns an all-zero
-  HUK, is only built when ``CFG_INSECURE=y`` (see :ref:`hardware_unique_key`).
-- The weak default ``plat_init_soft_prng()``, which seeds the software PRNG from
-  the system time, is only built when ``CFG_INSECURE=y`` (see
-  :ref:`porting_rng`).
-- With ``CFG_REE_FS_INTEGRITY_RPMB=n``, the REE file system continues without
-  a monotonic counter when the platform does not implement
-  ``nv_counter_get_ree_fs()`` (see :ref:`porting_secure_storage`).
+- ``tee_otp_get_hw_unique_key()`` returns an all-zero HUK (see
+  :ref:`hardware_unique_key`).
+- ``plat_init_soft_prng()`` seeds the software PRNG with a predictable value
+  (see :ref:`porting_rng`).
+- The REE file system runs without a monotonic counter when the platform does
+  not implement one (see :ref:`porting_secure_storage`).
 
-Several platforms also use it to gate security checks. For example, on i.MX
-``CFG_INSECURE=n`` forces ``CFG_TZASC_CHECK_ENABLED=y`` (i.MX 6 and i.MX 8M) and
-``CFG_TZASC_REGION0_SECURE=y`` (i.MX 8M), and on STM32MP platforms it controls
-whether firewall configuration errors cause a panic.
+With ``CFG_INSECURE=n`` these defaults are not available, so a missing platform
+implementation results in a build or runtime failure instead. Platforms can
+also use ``CFG_INSECURE`` to gate their own security checks, for example checks
+of the memory firewall configuration.
 
 A device that boots and passes ``xtest`` can still have security features
 disabled. The following sections describe the security relevant parts of a port.
@@ -674,9 +626,8 @@ cases the SoC has developed something equivalent. In OP-TEE this is very well
 reflected, i.e., different platforms have different ways of protecting their
 memory. On ARMv8-A platforms we are in most of the cases using Trusted Firmware
 A as the boot firmware and there the secure bootloader is the one that
-configures secure vs non-secure memory using TZASC (see
-``plat_arm_security_setup()`` in TF-A, for example in fvp_security.c_). The
-takeaway here is that you must make sure that you have configured whatever
+configures secure vs non-secure memory using TZASC. The takeaway here is that
+you must make sure that you have configured whatever
 memory firewall your device has such that it has a secure and a non-secure
 memory area.
 
@@ -696,18 +647,13 @@ region. On the TZC-380 it is configured as secure access only at reset, unless
 firmware that runs earlier changes it. If a component (for example U-Boot or
 TF-A) reconfigures region 0 to allow non-secure access, aliased addresses can
 fall through to it and expose secure memory. The i.MX 8M is an example of
-this combination: its DDR controller allows memory alias access, and U-Boot
-configures region 0 for secure and non-secure read/write access in
-``enable_tzc380()`` (``arch/arm/mach-imx/imx8m/soc.c``) because some bus masters,
-such as the USB dwc3 controllers, do not work with secure memory. TF-A commit
-``fix(imx8m): don't reconfigure default region0`` removed the corresponding
-region 0 configuration from TF-A.
+this combination: its DDR controller allows memory alias access, and a boot
+loader that opens region 0 for non-secure access exposes OP-TEE memory through
+the aliases.
 
-The firmware that runs before OP-TEE configures region 0. On i.MX platforms with
-a TZC-380, ``CFG_TZASC_REGION0_SECURE=y`` makes OP-TEE panic at boot with
-``region0 is not secure configured, non-secure memory alias access possible!``
-if region 0 is not secure access only. It is forced to ``y`` on i.MX 8M when
-``CFG_INSECURE=n``. Whether the SoC has memory aliasing can be
+The firmware that runs before OP-TEE configures region 0. On i.MX platforms,
+OP-TEE can check at boot that region 0 is secure access only and panic if it is
+not (``CFG_TZASC_REGION0_SECURE``). Whether the SoC has memory aliasing can be
 tested by mapping high address bits of a known secure address from the normal
 world and comparing the contents.
 
@@ -748,14 +694,12 @@ read or write them and interfere with the OP-TEE drivers that use the same
 hardware.
 
 OP-TEE configures its interrupts as Group 0 on GICv2 and as Secure Group 1 on
-GICv3 and GICv4 (see ``core/drivers/gic.c``). If an interrupt that the secure
+GICv3 and GICv4. If an interrupt that the secure
 world uses is configured as Non-secure Group 1, the normal world can handle or
 mask it.
 
-The ownership of each peripheral is defined by the SoC bus firewall. Examples
-of firewall drivers in OP-TEE are the i.MX CSU driver (``CFG_IMX_CSU``) and the
-STM32 ETZPC and RIFSC drivers (``CFG_STM32_ETZPC``, ``CFG_STM32_RIFSC``) in
-``core/drivers/firewall``. Device tree nodes and Linux drivers for
+The ownership of each peripheral is defined by the SoC bus firewall. OP-TEE
+contains drivers for some of these firewalls. Device tree nodes and Linux drivers for
 peripherals that belong to the secure world can be removed so that the two
 worlds do not access the same device. The secure interrupt configuration
 determines whether secure interrupts can be handled or masked by the non-secure
@@ -773,10 +717,8 @@ from software, not even from the secure side. There are different solutions to
 this, crypto accelerator might have support for it or, it could involve another
 secure co-processor.
 
-In OP-TEE the HUK **is** just **stubbed**. The function
-``tee_otp_get_hw_unique_key(...)`` is declared in
-`core/include/kernel/tee_common_otp.h`_ and the weak default implementation in
-``core/kernel/otp_stubs.c`` returns all zeroes. That default is only built when
+In OP-TEE the HUK **is** just **stubbed**. The default implementation of
+``tee_otp_get_hw_unique_key()`` returns all zeroes and is only available with
 ``CFG_INSECURE=y``, so a build with ``CFG_INSECURE=n`` fails to link unless the
 platform provides its own implementation. In a real secure product you **must**
 replace this with something else. If your device lacks the hardware support for
@@ -790,9 +732,9 @@ that is readable by the normal world, for example a chip ID, an SoC serial
 number or a MAC address, possibly combined with a fixed salt, then the value is
 not secret and every device that shares the same input has the same HUK. If the
 HUK is read from fuses or OTP regions that are also mapped as non-secure, it is
-readable from the normal world. ``huk_subkey_derive()`` derives the secure
-storage key (SSK), the TA unique key, the default TA encryption key, the die ID
-and the RPMB key from the HUK, so a HUK that is known or shared compromises
+readable from the normal world. OP-TEE derives the secure storage key (SSK),
+the TA unique key, the default TA encryption key, the die ID and the RPMB key
+from the HUK, so a HUK that is known or shared compromises
 those secrets on all devices that share it.
 
 The platform implementation of ``tee_otp_get_hw_unique_key()`` must:
@@ -810,7 +752,7 @@ The platform implementation of ``tee_otp_get_hw_unique_key()`` must:
 Trusted Application private/public keypair
 ==========================================
 By default all Trusted Applications (TA's) are signed with the pre-generated
-4096-bit RSA development key (private key). This key is located in the ``keys``
+RSA development key (private key). This key is located in the ``keys``
 folder (in the root of optee_os.git) and is named ``default_ta.pem``. This key
 **must** be replaced with your own key and you should **never ever** check-in
 this private key in the source code tree when in use in a real product. The
@@ -833,16 +775,13 @@ Trusted Application encryption key
 ==================================
 With ``CFG_ENCRYPT_TA=y``, REE file system TAs are encrypted with
 ``TA_ENC_KEY`` at build time (see :ref:`ree_fs_ta`). At runtime OP-TEE gets the
-decryption key from ``tee_otp_get_ta_enc_key()``. The weak default
-implementation derives a device specific key from the HUK. The key type
-recorded in the TA header, ``SHDR_ENC_KEY_DEV_SPECIFIC`` or
-``SHDR_ENC_KEY_CLASS_WIDE``, is selected with the ``--enc-key-type`` option of
-``scripts/sign_encrypt.py``. The weak default only supports
-``SHDR_ENC_KEY_DEV_SPECIFIC``.
+decryption key from ``tee_otp_get_ta_enc_key()``. The default implementation
+derives a device specific key from the HUK. A TA can be encrypted with a device
+specific or a class wide key, and the default implementation only supports the
+device specific one.
 
-The default ``TA_ENC_KEY`` in ``ta/link.mk`` is a dummy key derived from the
-all-zero default HUK. ``ta/link.mk`` states that a user of TA encryption needs
-to provide the encryption key and its handling.
+The default ``TA_ENC_KEY`` is a dummy key that matches the all-zero default HUK.
+A product that uses TA encryption provides its own key and key handling.
 
 .. _porting_rng:
 
@@ -866,19 +805,15 @@ available to OP-TEE drivers and frameworks, including Trusted Applications
 (through GP TEE Internal Core API) and normal world (when ``CFG_HWRNG_PTA=y``).
 
 When ``CFG_WITH_SOFTWARE_PRNG=y`` (the default), the software PRNG is seeded by
-``plat_init_soft_prng()``. The weak default seeds it with the system time, or
-with zeroes when ``CFG_SECURE_TIME_SOURCE_REE=y``, and it is only built when
-``CFG_INSECURE=y``. A platform with a hardware entropy source can instead
-override ``plat_init_soft_prng()`` and seed the software PRNG from it with
-``crypto_rng_init()``, as for example the STM32 RNG and SMCCC TRNG drivers do.
+``plat_init_soft_prng()``. The default implementation uses a predictable seed
+and is only available with ``CFG_INSECURE=y``. A platform with a hardware
+entropy source can instead override ``plat_init_soft_prng()`` and seed the
+software PRNG from it with ``crypto_rng_init()``.
 
-A platform that has a TRNG but where the TRNG driver is not enabled uses the
-software PRNG with whichever seed ``plat_init_soft_prng()`` provides. For
-example, on i.MX the CAAM RNG driver (``CFG_NXP_CAAM_RNG_DRV``, enabled with
-``CFG_NXP_CAAM``) sets ``CFG_WITH_SOFTWARE_PRNG ?= n`` and provides
-``hw_get_random_bytes()``, or seeds the software PRNG when
-``CFG_WITH_SOFTWARE_PRNG=y``. With ``CFG_NXP_CAAM=n`` neither is done and the
-software PRNG uses the default seed.
+A platform that has a TRNG, but where the driver for it is not enabled, uses
+the software PRNG with whichever seed ``plat_init_soft_prng()`` provides. This
+is also the case when the TRNG is part of a crypto accelerator whose driver is
+disabled.
 
 If the same TRNG is shared with the normal world without arbitration, the normal
 world can access the TRNG while the secure world uses it. TRNG output can be
@@ -902,20 +837,17 @@ Rollback protection of the REE file system requires one of:
   stores the root hash of the REE file system in RPMB.
 - A platform implementation of ``nv_counter_get_ree_fs()`` and
   ``nv_counter_incr_ree_fs_to()``, backed by a hardware monotonic counter, used
-  when ``CFG_REE_FS_INTEGRITY_RPMB=n``. The weak defaults return
-  ``TEE_ERROR_NOT_IMPLEMENTED``. With ``CFG_INSECURE=y`` OP-TEE then prints
-  ``WARNING (insecure configuration): Failed to get monotonic counter for REE
-  FS, using 0`` and continues without rollback protection. With
-  ``CFG_INSECURE=n`` opening the REE file system fails.
+  when ``CFG_REE_FS_INTEGRITY_RPMB=n``. Without it, OP-TEE prints a warning and
+  continues without rollback protection when ``CFG_INSECURE=y``, and fails to
+  open the REE file system when ``CFG_INSECURE=n``.
 
 The RPMB key is derived from the HUK and the eMMC CID (see
-:ref:`hardware_unique_key`). ``tee-supplicant`` is built with ``RPMB_EMU=1`` by
-default. The emulated RPMB device is kept in the memory of the
-``tee-supplicant`` process, so its contents, key and write counter are lost
+:ref:`hardware_unique_key`). ``tee-supplicant`` can emulate an RPMB device,
+which its default build enables. The emulated device is kept in the memory of
+the ``tee-supplicant`` process, so its contents, key and write counter are lost
 when ``tee-supplicant`` restarts, and it does not exercise the real eMMC
-behavior. ``CFG_RPMB_FS_DEV_ID`` selects which MMC device is used (on Linux
-``tee-supplicant`` opens ``/dev/mmcblk<id>rpmb``), and the device numbering can
-differ between the boot loader and the kernel.
+behavior. ``CFG_RPMB_FS_DEV_ID`` selects which MMC device is used, and the
+device numbering can differ between the boot loader and the kernel.
 
 See :ref:`secure_storage` for the details of both implementations.
 
@@ -925,21 +857,21 @@ RPMB key provisioning
 =====================
 The RPMB key is programmed once and cannot be changed afterwards.
 
-- ``CFG_RPMB_TESTKEY=y`` uses a hard coded key from ``core/tee/tee_rpmb_fs.c``.
+- ``CFG_RPMB_TESTKEY=y`` uses a hard coded key from the OP-TEE source code.
   The key is publicly known and identical on all devices.
-- With ``CFG_RPMB_TESTKEY=n`` (the default) the key is derived with
-  ``huk_subkey_derive()`` from the HUK and the eMMC CID. The CID is readable
-  from the normal world, so anyone who knows the HUK can compute the RPMB key.
-- ``CFG_RPMB_WRITE_KEY=y`` (default ``n``) lets OP-TEE program the key into an
-  eMMC device that has no key yet. The key programming request travels through
-  the normal world (``tee-supplicant`` or the kernel) to the eMMC device, so the
-  key is exposed to the normal world. ``mk/config.mk`` states that this option
-  must not be enabled in product builds.
+- With ``CFG_RPMB_TESTKEY=n`` (the default) the key is derived from the HUK and
+  the eMMC CID. The CID is readable from the normal world, so anyone who knows
+  the HUK can compute the RPMB key.
+- ``CFG_RPMB_WRITE_KEY=y`` lets OP-TEE program the key into an eMMC device that
+  has no key yet. The key programming request travels through the normal world
+  to the eMMC device, so the key is exposed to the normal world. The OP-TEE
+  build configuration states that this option must not be enabled in product
+  builds.
 - With ``CFG_RPMB_WRITE_KEY=y``, OP-TEE programs the key into any eMMC device
   without a key that it is pointed to. ``CFG_RPMB_WRITE_KEY_CID`` restricts
-  provisioning to the device with the given CID.
-- ``plat_rpmb_key_is_ready()`` is checked before OP-TEE programs the key. The
-  weak default returns ``true``.
+  provisioning to the device with the given CID, and the platform function
+  ``plat_rpmb_key_is_ready()`` can prevent provisioning until the platform is
+  ready.
 - ``CFG_RPMB_FS_DEV_ID`` selects which MMC device is used, and the
   ``tee-supplicant`` option ``--rpmb-cid`` selects the RPMB device by its CID. If
   the key is programmed while the HUK is still a development value, the key
@@ -957,13 +889,13 @@ clock. Note that from GlobalPlatform point of view it is not required to make
 use of a secure clock, i.e., it is OK to use time from REE, but the level of
 trust should be reflected by the ``gpd.tee.systemTime.protectionLevel`` property
 and the ``gpd.tee.TAPersistentTime.protectionLevel`` property (100=REE
-controlled clock, 1000=TEE controlled clock). So the functions that one needs to
-pay attention to are ``tee_time_get_sys_time(...)`` and
-``tee_time_get_ta_time(...)``. If your hardware has a secure clock, then you
-probably want to change the implementation there to instead use the secure clock
-(and then you would also need to update the property accordingly, i.e.,
-``tee_time_get_sys_time_protection_level()`` and the variable
-``ta_time_prot_lvl`` in ``tee_svc.c``).
+controlled clock, 1000=TEE controlled clock).
+
+The system time source is selected with a ``CFG_SECURE_TIME_SOURCE_*`` option,
+for example ``CFG_SECURE_TIME_SOURCE_CNTPCT`` for the Arm generic timer or
+``CFG_SECURE_TIME_SOURCE_REE`` for time from the normal world. Each time source
+reports its own protection level, so a platform that adds a secure time source
+also reports the matching protection level.
 
 Root and Chain of Trust
 =======================
@@ -1005,9 +937,8 @@ Power transitions and secondary cores
 =====================================
 A TZASC or bus firewall that is not in an always-on power domain loses its
 configuration on suspend-to-RAM, and must be reconfigured on resume. For
-example, the comment in ``core/arch/arm/plat-imx/tzc380.c`` states that the
-TZASC is not part of an always-on power domain on i.MX 8M, and the driver
-registers a resume callback that reconfigures it. Per-core secure configuration
+example, the TZASC is not part of an always-on power domain on i.MX 8M.
+Per-core secure configuration
 must also be applied when secondary cores are brought up. Secure SRAM/OCRAM that
 holds stacks or keys can be left readable across low-power states if it is not
 cleared or protected. These paths are not covered by a cold boot test.
@@ -1058,46 +989,27 @@ options affect security and have defaults or common development settings that
 differ from a production configuration:
 
 - ``CFG_INSECURE`` defaults to ``y``. With ``CFG_INSECURE=n`` the insecure
-  weak defaults are not built and several platform security checks are enabled
-  (see :ref:`vendor_platform_code`).
-- ``CFG_TEE_CORE_DEBUG`` defaults to ``y``. It enables assertions and lock
-  checks, more verbose panic and assert messages, and stack dumps on data and
-  prefetch aborts.
-- ``CFG_TEE_CORE_LOG_LEVEL`` defaults to ``2`` (error and info). It defines
-  which core messages are printed on the secure console. Level ``0`` also
-  disables TA logs.
-- ``DEBUG=1`` forces ``CFG_CC_OPT_LEVEL=0`` (no optimization) and
-  ``CFG_DEBUG_INFO=y``.
-- ``CFG_DEBUG_INFO`` defaults to ``y`` and embeds debug information in the core.
-- ``CFG_UNWIND`` defaults to ``y`` when ``CFG_TEE_CORE_DEBUG=y`` and prints call
-  stacks. ``mk/config.mk`` states that it weakens the user/kernel isolation,
-  since the unwinding of TA code is done in the privileged layer, and that it
-  should be disabled in release builds.
-- ``CFG_RPMB_TESTKEY`` (default ``n``) uses a publicly known RPMB key (see
-  :ref:`porting_rpmb_provisioning`).
-- ``CFG_RPMB_WRITE_KEY`` (default ``n``) exposes the RPMB key to the normal
-  world when the key is programmed.
-- ``CFG_CORE_ASLR`` defaults to ``y``. ``CFG_CORE_WORKAROUND_SPECTRE_BP``,
-  ``CFG_CORE_WORKAROUND_SPECTRE_BP_SEC`` and
-  ``CFG_CORE_WORKAROUND_NSITR_CACHE_PRIME`` default to ``y`` on Arm.
-- ``CFG_WITH_PAGER`` defaults to ``n`` and requires SRAM.
+  defaults are not available and platform security checks can be enabled (see
+  :ref:`vendor_platform_code`).
+- ``CFG_TEE_CORE_DEBUG`` enables assertions and lock checks, more verbose panic
+  and assert messages, and stack dumps on aborts.
+- ``CFG_TEE_CORE_LOG_LEVEL`` defines which core messages are printed on the
+  secure console. Level ``0`` also disables TA logs.
+- ``DEBUG=1`` disables compiler optimization and enables debug information.
+- ``CFG_UNWIND`` prints call stacks. Since the unwinding of TA code is done in
+  the privileged layer, it weakens the user/kernel isolation, and the build
+  configuration states that it should be disabled in release builds.
+- ``CFG_RPMB_TESTKEY`` and ``CFG_RPMB_WRITE_KEY`` affect the secrecy of the
+  RPMB key (see :ref:`porting_rpmb_provisioning`).
 
-The following exploit mitigations are configurable. Some of them depend on CPU
-features and toolchain support:
+OP-TEE also has configurable exploit mitigations, such as ASLR for the core and
+for TAs, stack canaries, Spectre workarounds, non-executable data, Branch
+Target Identification, Pointer Authentication, Memory Tagging and Privileged
+Access Never. Some of them are disabled by default, and some depend on CPU
+features and toolchain support.
 
-- Enabled by default: ``CFG_CORE_ASLR``, ``CFG_TA_ASLR``,
-  ``CFG_WITH_STACK_CANARIES`` and, on Arm, ``CFG_CORE_RWDATA_NOEXEC``.
-- Disabled by default:
-
-  - ``CFG_CORE_BTI`` and ``CFG_TA_BTI``: Branch Target Identification
-    (Armv8.5). Requires a GCC toolchain built with
-    ``--enable-standard-branch-protection``.
-  - ``CFG_CORE_PAUTH`` and ``CFG_TA_PAUTH``: Pointer Authentication.
-  - ``CFG_MEMTAG``: Memory Tagging Extension (Armv8.5). Not compatible with
-    ``CFG_WITH_PAGER``.
-  - ``CFG_PAN``: Privileged Access Never (Armv8.1, and the ``SUM`` bit on
-    RISC-V).
-  - ``CFG_CORE_RODATA_NOEXEC``: maps read-only data as non-executable.
+``mk/config.mk`` and ``core/arch/<arch>/<arch>.mk`` document each option and its
+default.
 
 A production configuration can be kept separately and compared with the
 development configuration, for example in CI.
@@ -1108,8 +1020,8 @@ Security porting checklist
 ==========================
 The following checklist summarizes the topics in :ref:`porting_production`.
 
-- Insecure defaults: no platform function relies on a weak default that is only
-  built with ``CFG_INSECURE=y``.
+- Insecure defaults: no platform function relies on a default that is only
+  available with ``CFG_INSECURE=y``.
 - Memory: TZASC/firewalls configured and locked, including memory aliases
   (region 0) and non-CPU bus masters.
 - Peripherals: secure-only peripherals and secure interrupts not reachable from
@@ -1136,12 +1048,9 @@ The following checklist summarizes the topics in :ref:`porting_production`.
 
 
 .. _core/arch/arm/plat-hikey/conf.mk: https://github.com/OP-TEE/optee_os/blob/master/core/arch/arm/plat-hikey/conf.mk
-.. _core/include/crypto/crypto.h: https://github.com/OP-TEE/optee_os/blob/master/core/include/crypto/crypto.h
-.. _core/include/kernel/tee_common_otp.h: https://github.com/OP-TEE/optee_os/blob/master/core/include/kernel/tee_common_otp.h
 
 
 .. _auth-framework.rst: https://trustedfirmware-a.readthedocs.io/en/latest/design/auth-framework.html
 .. _HSM: https://en.wikipedia.org/wiki/Hardware_security_module
 .. _MAINTAINERS: https://github.com/OP-TEE/optee_os/blob/master/MAINTAINERS
 .. _OTP: https://en.wikipedia.org/wiki/Programmable_read-only_memory
-.. _fvp_security.c: https://github.com/TrustedFirmware-A/trusted-firmware-a/blob/main/plat/arm/board/fvp/fvp_security.c

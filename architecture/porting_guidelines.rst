@@ -312,11 +312,30 @@ A port of OP-TEE to a new SoC or board can contain code and configuration
 provided by the vendor. Security critical configuration is spread across several
 components, for example TF-A, U-Boot, OP-TEE, the device tree and fuses.
 
-OP-TEE has a ``CFG_INSECURE`` switch (formerly ``CFG_WARN_INSECURE``). When it
-is enabled, OP-TEE permits development-only configurations and prints a message
-at boot indicating that the device runs a standard developer configuration.
-Several platforms use it to gate security checks, for example the TZASC checks
-on i.MX. When ``CFG_INSECURE=y`` those checks are disabled.
+OP-TEE has a ``CFG_INSECURE`` switch (formerly ``CFG_WARN_INSECURE``, which is
+deprecated). It defaults to ``y`` in ``mk/config.mk``. When it is enabled,
+OP-TEE permits insecure development configurations and prints the following at
+boot (info level):
+
+.. code-block:: none
+
+    WARNING: This OP-TEE configuration might be insecure!
+
+``CFG_INSECURE=y`` has the following effects in the core:
+
+- The weak default ``tee_otp_get_hw_unique_key()``, which returns an all-zero
+  HUK, is only built when ``CFG_INSECURE=y`` (see :ref:`hardware_unique_key`).
+- The weak default ``plat_init_soft_prng()``, which seeds the software PRNG from
+  the system time, is only built when ``CFG_INSECURE=y`` (see
+  :ref:`porting_rng`).
+- With ``CFG_REE_FS_INTEGRITY_RPMB=n``, the REE file system continues without
+  a monotonic counter when the platform does not implement
+  ``nv_counter_get_ree_fs()`` (see :ref:`porting_secure_storage`).
+
+Several platforms also use it to gate security checks. For example, on i.MX
+``CFG_INSECURE=n`` forces ``CFG_TZASC_CHECK_ENABLED=y`` (i.MX 6 and i.MX 8M) and
+``CFG_TZASC_REGION0_SECURE=y`` (i.MX 8M), and on STM32MP platforms it controls
+whether firewall configuration errors cause a panic.
 
 A device that boots and passes ``xtest`` can still have security features
 disabled. The following sections describe the security relevant parts of a port.
@@ -333,9 +352,12 @@ from software, not even from the secure side. There are different solutions to
 this, crypto accelerator might have support for it or, it could involve another
 secure co-processor.
 
-In OP-TEE the HUK **is** just **stubbed** and you will see that in the function
-called ``tee_otp_get_hw_unique_key(...)`` in
-`core/include/kernel/tee_common_otp.h`_. In a real secure product you **must**
+In OP-TEE the HUK **is** just **stubbed**. The function
+``tee_otp_get_hw_unique_key(...)`` is declared in
+`core/include/kernel/tee_common_otp.h`_ and the weak default implementation in
+``core/kernel/otp_stubs.c`` returns all zeroes. That default is only built when
+``CFG_INSECURE=y``, so a build with ``CFG_INSECURE=n`` fails to link unless the
+platform provides its own implementation. In a real secure product you **must**
 replace this with something else. If your device lacks the hardware support for
 a HUK, then you must at least change this to something else than just zeroes.
 But, remember it is not good secure practice to store a key in software,
@@ -347,18 +369,19 @@ that is readable by the normal world, for example a chip ID, an SoC serial
 number or a MAC address, possibly combined with a fixed salt, then the value is
 not secret and every device that shares the same input has the same HUK. If the
 HUK is read from fuses or OTP regions that are also mapped as non-secure, it is
-readable from the normal world. The HUK is the root from which secure storage
-keys, TA keys and the RPMB key are derived, so a HUK that is known or shared
-compromises those secrets on all devices that share it.
+readable from the normal world. ``huk_subkey_derive()`` derives the secure
+storage key (SSK), the TA unique key, the default TA encryption key, the die ID
+and the RPMB key from the HUK, so a HUK that is known or shared compromises
+those secrets on all devices that share it.
 
 The platform implementation of ``tee_otp_get_hw_unique_key()`` must:
 
 - Return a per-device secret that is not readable outside the secure world, for
   example a key protected by a crypto accelerator or a secure-only OTP/eFuse
   region.
-- Expose the read path only to the secure world, and keep the value independent
-  of the security state in a way that does not break key derivation (see the
-  RPMB key discussion below and :ref:`secure_storage`).
+- Return the same value on every boot. Keys derived from the HUK, such as the
+  SSK and the RPMB key, change if the HUK changes, and data that was protected
+  with the previous keys can no longer be accessed.
 - Not fall back to a fixed or all-zero key in a production build.
 
 .. _porting_secure_storage:
@@ -367,18 +390,32 @@ Secure storage and rollback protection
 **************************************
 OP-TEE can store Trusted Application data either in the normal world file
 system (``CFG_REE_FS=y``, the default) or in the Replay Protected Memory Block
-(RPMB) partition of an eMMC device (``CFG_RPMB_FS=y``). The REE file system
-encrypts and integrity protects the blobs, but it does not protect against
-rollback: an attacker with write access to the normal world file system can
-restore an old snapshot of the storage, and OP-TEE then sees old counters, old
-credentials and old anti-rollback state. Rollback protection is provided by
-RPMB.
+(RPMB) partition of an eMMC device (``CFG_RPMB_FS=y``, default ``n``). The REE
+file system encrypts and integrity protects the blobs. On its own it does not
+protect against rollback: an attacker with write access to the normal world file
+system can restore an old snapshot of the storage, and OP-TEE then sees old
+counters, old credentials and old anti-rollback state.
 
-The RPMB key is derived from the HUK (see :ref:`hardware_unique_key`). The
-emulated RPMB device provided by ``tee-supplicant`` starts from scratch on every
-boot and does not exercise the real eMMC behavior. ``CFG_RPMB_FS_DEV_ID``
-selects which MMC device is used, and the device probe order can differ between
-the boot loader, the kernel and OP-TEE.
+Rollback protection of the REE file system requires one of:
+
+- ``CFG_REE_FS_INTEGRITY_RPMB=y`` (the default when ``CFG_RPMB_FS=y``), which
+  stores the root hash of the REE file system in RPMB.
+- A platform implementation of ``nv_counter_get_ree_fs()`` and
+  ``nv_counter_incr_ree_fs_to()``, backed by a hardware monotonic counter, used
+  when ``CFG_REE_FS_INTEGRITY_RPMB=n``. The weak defaults return
+  ``TEE_ERROR_NOT_IMPLEMENTED``. With ``CFG_INSECURE=y`` OP-TEE then prints
+  ``WARNING (insecure configuration): Failed to get monotonic counter for REE
+  FS, using 0`` and continues without rollback protection. With
+  ``CFG_INSECURE=n`` opening the REE file system fails.
+
+The RPMB key is derived from the HUK and the eMMC CID (see
+:ref:`hardware_unique_key`). ``tee-supplicant`` is built with ``RPMB_EMU=1`` by
+default. The emulated RPMB device is kept in the memory of the
+``tee-supplicant`` process, so its contents, key and write counter are lost
+when ``tee-supplicant`` restarts, and it does not exercise the real eMMC
+behavior. ``CFG_RPMB_FS_DEV_ID`` selects which MMC device is used (on Linux
+``tee-supplicant`` opens ``/dev/mmcblk<id>rpmb``), and the device numbering can
+differ between the boot loader and the kernel.
 
 See :ref:`secure_storage` for the details of both implementations.
 
@@ -388,19 +425,25 @@ RPMB key provisioning
 *********************
 The RPMB key is programmed once and cannot be changed afterwards.
 
-- ``CFG_RPMB_TESTKEY=y`` embeds a public key that is identical on all devices.
-- With ``CFG_RPMB_TESTKEY=n`` the key is derived from a per-device secret,
-  typically the HUK. If the HUK is not unique, the derived RPMB key is not
-  unique either.
-- ``CFG_RPMB_WRITE_KEY`` lets the normal world relay the key programming
-  request to the eMMC device, so the key is present in the normal world.
-- If the key write is left unlocked, a key can be provisioned on a fresh device
-  by anyone who can run the programming tool.
-- ``CFG_RPMB_FS_DEV_ID`` selects which MMC device is used, and ``--rpmb-cid``
-  selects the device when provisioning. If the wrong device is chosen, or the
-  key is programmed before the board is secured, subsequent RPMB accesses fail.
-- ``plat_rpmb_key_is_ready()`` controls whether OP-TEE is allowed to program the
-  key at runtime.
+- ``CFG_RPMB_TESTKEY=y`` uses a hard coded key from ``core/tee/tee_rpmb_fs.c``.
+  The key is publicly known and identical on all devices.
+- With ``CFG_RPMB_TESTKEY=n`` (the default) the key is derived with
+  ``huk_subkey_derive()`` from the HUK and the eMMC CID. The CID is readable
+  from the normal world, so anyone who knows the HUK can compute the RPMB key.
+- ``CFG_RPMB_WRITE_KEY=y`` (default ``n``) lets OP-TEE program the key into an
+  eMMC device that has no key yet. The key programming request travels through
+  the normal world (``tee-supplicant`` or the kernel) to the eMMC device, so the
+  key is exposed to the normal world. ``mk/config.mk`` states that this option
+  must not be enabled in product builds.
+- With ``CFG_RPMB_WRITE_KEY=y``, OP-TEE programs the key into any eMMC device
+  without a key that it is pointed to. ``CFG_RPMB_WRITE_KEY_CID`` restricts
+  provisioning to the device with the given CID.
+- ``plat_rpmb_key_is_ready()`` is checked before OP-TEE programs the key. The
+  weak default returns ``true``.
+- ``CFG_RPMB_FS_DEV_ID`` selects which MMC device is used, and the
+  ``tee-supplicant`` option ``--rpmb-cid`` selects the RPMB device by its CID. If
+  the key is programmed while the HUK is still a development value, the key
+  derived later from the production HUK does not match and RPMB accesses fail.
 
 See :ref:`rpmb` for the full description.
 
@@ -468,6 +511,8 @@ given cryptographic operations in OP-TEE core crypto API. Our
 :ref:`cryptographic_implementation` page describes in detail how the Crypto API
 is integrated.
 
+.. _porting_rng:
+
 Random Number Generator
 ***********************
 By default OP-TEE is configured with a software PRNG. The entropy is added to
@@ -487,12 +532,24 @@ When ``CFG_WITH_SOFTWARE_PRNG=n``, the random number generator is made
 available to OP-TEE drivers and frameworks, including Trusted Applications
 (through GP TEE Internal Core API) and normal world (when ``CFG_HWRNG_PTA=y``).
 
-If the same TRNG is shared with Linux without arbitration, the normal world can
-influence or observe the entropy that goes into the secure world. A platform
-that has a TRNG but has not ported or enabled the driver (``CFG_HWRNG_PTA`` and
-the platform ``hw_get_random_bytes()`` implementation) falls back to the
-software PRNG. TRNG output can be validated with a statistical test suite such
-as the NIST suite.
+When ``CFG_WITH_SOFTWARE_PRNG=y`` (the default), the software PRNG is seeded by
+``plat_init_soft_prng()``. The weak default seeds it with the system time, or
+with zeroes when ``CFG_SECURE_TIME_SOURCE_REE=y``, and it is only built when
+``CFG_INSECURE=y``. A platform with a hardware entropy source can instead
+override ``plat_init_soft_prng()`` and seed the software PRNG from it with
+``crypto_rng_init()``, as for example the STM32 RNG and SMCCC TRNG drivers do.
+
+A platform that has a TRNG but where the TRNG driver is not enabled uses the
+software PRNG with whichever seed ``plat_init_soft_prng()`` provides. For
+example, on i.MX the CAAM RNG driver (``CFG_NXP_CAAM_RNG_DRV``, enabled with
+``CFG_NXP_CAAM``) sets ``CFG_WITH_SOFTWARE_PRNG ?= n`` and provides
+``hw_get_random_bytes()``, or seeds the software PRNG when
+``CFG_WITH_SOFTWARE_PRNG=y``. With ``CFG_NXP_CAAM=n`` neither is done and the
+software PRNG uses the default seed.
+
+If the same TRNG is shared with the normal world without arbitration, the normal
+world can access the TRNG while the secure world uses it. TRNG output can be
+validated with a statistical test suite such as the NIST suite.
 
 .. _porting_production_build:
 
@@ -502,18 +559,30 @@ The default OP-TEE configuration is a development configuration. The following
 options affect security and have defaults or common development settings that
 differ from a production configuration:
 
-- ``CFG_INSECURE`` defaults to ``y``. With ``CFG_INSECURE=n`` several platform
-  security checks are enabled, for example the TZASC checks on i.MX.
-- ``CFG_TEE_CORE_DEBUG`` defaults to ``y``; ``DEBUG=1`` disables optimization
-  and forces ``CFG_DEBUG_INFO=y``. Together with ``CFG_TEE_CORE_LOG_LEVEL`` they
-  control how much internal state is printed on the console.
-- ``CFG_UNWIND`` and ``CFG_DEBUG_INFO`` make call stack and address information
-  available.
-- ``CFG_RPMB_TESTKEY`` embeds a public test key (see
+- ``CFG_INSECURE`` defaults to ``y``. With ``CFG_INSECURE=n`` the insecure
+  weak defaults are not built and several platform security checks are enabled
+  (see :ref:`vendor_platform_code`).
+- ``CFG_TEE_CORE_DEBUG`` defaults to ``y``. It enables assertions and lock
+  checks, more verbose panic and assert messages, and stack dumps on data and
+  prefetch aborts.
+- ``CFG_TEE_CORE_LOG_LEVEL`` defaults to ``2`` (error and info). It defines
+  which core messages are printed on the secure console. Level ``0`` also
+  disables TA logs.
+- ``DEBUG=1`` forces ``CFG_CC_OPT_LEVEL=0`` (no optimization) and
+  ``CFG_DEBUG_INFO=y``.
+- ``CFG_DEBUG_INFO`` defaults to ``y`` and embeds debug information in the core.
+- ``CFG_UNWIND`` defaults to ``y`` when ``CFG_TEE_CORE_DEBUG=y`` and prints call
+  stacks. ``mk/config.mk`` states that it weakens the user/kernel isolation,
+  since the unwinding of TA code is done in the privileged layer, and that it
+  should be disabled in release builds.
+- ``CFG_RPMB_TESTKEY`` (default ``n``) uses a publicly known RPMB key (see
   :ref:`porting_rpmb_provisioning`).
-- ``CFG_CORE_ASLR`` defaults to ``y``. The ``CFG_CORE_WORKAROUND_SPECTRE_BP``
-  family is enabled by default on Armv8-A.
-- ``CFG_WITH_PAGER`` defaults to ``n`` and requires SRAM support.
+- ``CFG_RPMB_WRITE_KEY`` (default ``n``) exposes the RPMB key to the normal
+  world when the key is programmed.
+- ``CFG_CORE_ASLR`` defaults to ``y``. ``CFG_CORE_WORKAROUND_SPECTRE_BP``,
+  ``CFG_CORE_WORKAROUND_SPECTRE_BP_SEC`` and
+  ``CFG_CORE_WORKAROUND_NSITR_CACHE_PRIME`` default to ``y`` on Arm.
+- ``CFG_WITH_PAGER`` defaults to ``n`` and requires SRAM.
 
 A production configuration can be kept separately and compared with the
 development configuration, for example in CI.
@@ -542,11 +611,14 @@ return. In a real production device, you would probably want to save and restore
 CPU states, secure hardware IPs' registers and TZASC and other memory firewall
 related setting when these callbacks are being called.
 
-The TZASC and bus firewall configuration can be lost on suspend-to-RAM and is
-then not restored on resume. Secondary cores can be brought up without the
-secure configuration applied. Secure SRAM/OCRAM that holds stacks or keys can be
-left readable across low-power states if it is not cleared or protected. These
-paths are not covered by a cold boot test.
+A TZASC or bus firewall that is not in an always-on power domain loses its
+configuration on suspend-to-RAM, and must be reconfigured on resume. For
+example, on i.MX 8M the TZASC is not in an always-on power domain and OP-TEE
+reconfigures it from a ``PM_OP_RESUME`` callback in
+``core/arch/arm/plat-imx/tzc380.c``. Per-core secure configuration must also be
+applied when secondary cores are brought up. Secure SRAM/OCRAM that holds stacks
+or keys can be left readable across low-power states if it is not cleared or
+protected. These paths are not covered by a cold boot test.
 
 Memory firewalls / TZASC
 ************************
@@ -595,18 +667,21 @@ memory alias aware: it can see two different addresses while the DDR controller
 maps both to one location. If the second address falls through to an open
 region, the isolation check is bypassed.
 
-Region 0 of TZASC is special. It is a wildcard/fallback region that covers the
-whole address space and is secure-access-only at reset, unless earlier firmware
-changes it. If a component (for example U-Boot or TF-A) reconfigures region 0 to
-allow non-secure access, aliased addresses can fall through to it and expose
-secure memory. The NXP i.MX 8M has been affected by exactly this combination:
-the DDR controller ignores address bit 32, so e.g. ``0xbe000000`` and
-``0x1be000000`` alias the same OP-TEE core memory, and a region 0 reopened by
-U-Boot allowed the alias to escape (see :ref:`nxp`).
+Region 0 of TZASC is special. It is the background region that covers the
+whole address space and applies to any address that is not covered by another
+region. On the TZC-380 it is configured as secure access only at reset, unless
+firmware that runs earlier changes it. If a component (for example U-Boot or
+TF-A) reconfigures region 0 to allow non-secure access, aliased addresses can
+fall through to it and expose secure memory. The NXP i.MX 8M has been affected
+by this combination: the DDR controller ignores address bit 32, so e.g.
+``0xbe000000`` and ``0x1be000000`` alias the same OP-TEE core memory, and a
+region 0 reconfigured by U-Boot allowed access through the alias.
 
-The firmware that runs before OP-TEE configures region 0. On some platforms
-OP-TEE can verify this with ``CFG_TZASC_REGION0_SECURE``, which makes OP-TEE
-panic if region 0 is not secure. Whether the SoC has memory aliasing can be
+The firmware that runs before OP-TEE configures region 0. On i.MX platforms with
+a TZC-380, ``CFG_TZASC_REGION0_SECURE=y`` makes OP-TEE panic at boot with
+``region0 is not secure configured, non-secure memory alias access possible!``
+if region 0 is not secure access only. It is forced to ``y`` on i.MX 8M when
+``CFG_INSECURE=n``. Whether the SoC has memory aliasing can be
 tested by mapping high address bits of a known secure address from the normal
 world and comparing the contents.
 
@@ -625,9 +700,10 @@ they are mapped as non-secure. Linux drivers for the same peripherals can then
 read or write them and interfere with the OP-TEE drivers that use the same
 hardware.
 
-Secure interrupts are normally delivered as GIC Group 0 (FIQ). If the interrupt
-configuration is wrong, the normal world can handle or mask interrupts that
-belong to the secure world.
+OP-TEE configures its interrupts as Group 0 on GICv2 and as Secure Group 1 on
+GICv3 and GICv4 (see ``core/drivers/gic.c``). If an interrupt that the secure
+world uses is configured as Non-secure Group 1, the normal world can handle or
+mask it.
 
 The ownership of each peripheral is defined by the SoC bus firewall (CSU,
 RDC/XRDC/TRDC, AIPSTZ or equivalent). Device tree nodes and Linux drivers for
@@ -725,8 +801,10 @@ The following checklist summarizes the topics in this document.
   the normal world.
 - Build: production configuration without development flags and with
   ``CFG_INSECURE=n``.
-- Secure storage: RPMB with a per-device key derived from the HUK, and rollback
-  protection verified on real hardware.
+- Secure storage: rollback protection through RPMB
+  (``CFG_REE_FS_INTEGRITY_RPMB`` or ``CFG_RPMB_FS``) or a platform monotonic
+  counter, with the RPMB key derived from a unique HUK, verified on real
+  hardware.
 - RNG: hardware TRNG driver ported, enabled, validated and secure-only.
 - Secure boot: full chain of trust with production keys and anti-rollback
   counters.

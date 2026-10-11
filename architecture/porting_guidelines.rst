@@ -495,9 +495,9 @@ known-vulnerable OP-TEE or TF-A image that is still correctly signed. The
 counters can be stored in RPMB or in fuses, and each boot stage can check and
 update them. If secure boot is enabled in software but the corresponding fuse is
 left open, or if the images are signed with a debug key instead of the
-production key, the chain of trust does not hold. The full chain, from the boot
-ROM through TF-A and OP-TEE to the TAs, is signed and verified with production
-keys.
+production key, the chain of trust does not hold. The chain of trust covers
+every stage from the boot ROM through TF-A and OP-TEE to the TAs, and each stage
+verifies the next one.
 
 Hardware Crypto IP
 ******************
@@ -651,7 +651,7 @@ restrict DMA to the secure regions.
 The relevant checks are:
 
 - The secure/non-secure attribute of each master in the SoC interconnect or bus
-  firewall (CSU, RDC/XRDC/TRDC, AIPSTZ or equivalent).
+  firewall.
 - The SMMU/IOMMU configuration, or an equivalent way to block DMA to the secure
   regions.
 - Whether a DMA-capable peripheral can read a known secure buffer from the
@@ -672,10 +672,13 @@ whole address space and applies to any address that is not covered by another
 region. On the TZC-380 it is configured as secure access only at reset, unless
 firmware that runs earlier changes it. If a component (for example U-Boot or
 TF-A) reconfigures region 0 to allow non-secure access, aliased addresses can
-fall through to it and expose secure memory. The NXP i.MX 8M has been affected
-by this combination: the DDR controller ignores address bit 32, so e.g.
-``0xbe000000`` and ``0x1be000000`` alias the same OP-TEE core memory, and a
-region 0 reconfigured by U-Boot allowed access through the alias.
+fall through to it and expose secure memory. The i.MX 8M is an example of
+this combination: its DDR controller allows memory alias access, and U-Boot
+configures region 0 for secure and non-secure read/write access in
+``enable_tzc380()`` (``arch/arm/mach-imx/imx8m/soc.c``) because some bus masters,
+such as the USB dwc3 controllers, do not work with secure memory. TF-A commit
+``fix(imx8m): don't reconfigure default region0`` removed the corresponding
+region 0 configuration from TF-A.
 
 The firmware that runs before OP-TEE configures region 0. On i.MX platforms with
 a TZC-380, ``CFG_TZASC_REGION0_SECURE=y`` makes OP-TEE panic at boot with
@@ -685,10 +688,10 @@ if region 0 is not secure access only. It is forced to ``y`` on i.MX 8M when
 tested by mapping high address bits of a known secure address from the normal
 world and comparing the contents.
 
-A read through ``/dev/mem`` can be blocked by ``CONFIG_STRICT_DEVMEM``, or the
-region can be covered by a ``no-map`` reserved memory node, before TrustZone is
-involved. A denied access through such a path does not by itself demonstrate
-that the secure memory is protected.
+With ``CONFIG_STRICT_DEVMEM=y``, Linux blocks ``/dev/mem`` access to pages that
+it considers RAM before the access reaches the bus. A denied access through
+``/dev/mem`` therefore does not by itself demonstrate that the TZASC protects the
+secure memory.
 
 .. _secure_peripherals:
 
@@ -705,8 +708,10 @@ GICv3 and GICv4 (see ``core/drivers/gic.c``). If an interrupt that the secure
 world uses is configured as Non-secure Group 1, the normal world can handle or
 mask it.
 
-The ownership of each peripheral is defined by the SoC bus firewall (CSU,
-RDC/XRDC/TRDC, AIPSTZ or equivalent). Device tree nodes and Linux drivers for
+The ownership of each peripheral is defined by the SoC bus firewall. Examples
+of firewall drivers in OP-TEE are the i.MX CSU driver (``CFG_IMX_CSU``) and the
+STM32 ETZPC and RIFSC drivers (``CFG_STM32_ETZPC``, ``CFG_STM32_RIFSC``) in
+``core/drivers/firewall``. Device tree nodes and Linux drivers for
 peripherals that belong to the secure world can be removed so that the two
 worlds do not access the same device. The secure interrupt configuration
 determines whether secure interrupts can be handled or masked by the non-secure
@@ -738,9 +743,9 @@ The following debug features affect the secure world:
 
 - JTAG/SWD access to the secure world, including CoreSight/ETM trace, can be
   controlled with fuses or an authenticated debug unlock mechanism.
-- A secure UART console prints TEE logs, assertions and panic information.
-- "Debug mode" fuse bits are programmed on development units and can remain
-  programmed on shipped boards.
+- A secure UART console prints TEE logs, assertions and panic information. The
+  amount of output is controlled by ``CFG_TEE_CORE_LOG_LEVEL`` and
+  ``CFG_TEE_CORE_DEBUG`` (see :ref:`porting_production_build`).
 
 An authenticated debug unlock mechanism provides field debugging without
 leaving the interface permanently open.

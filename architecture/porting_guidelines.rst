@@ -271,10 +271,8 @@ This is a mandatory header file for every platform, since there are several
 files relying upon the existence of this particular file. It defines base
 addresses of peripherals, clocks and memory that are not configured in
 ``conf.mk``. Most platforms include ``mm/generic_ram_layout.h``, which derives
-the memory layout macros (``TEE_RAM_START``, ``TA_RAM_START``,
-``TEE_SHMEM_START`` and others) from the ``CFG_TZDRAM_*`` and ``CFG_SHMEM_*``
-values in ``conf.mk``. The header file documents the resulting layout, with and
-without ``CFG_WITH_PAGER``. Our fictive gendev could look like this:
+the memory layout macros from the ``CFG_`` memory options in ``conf.mk`` (see
+:ref:`Memory layout <porting_memory_layout>` below). Our fictive gendev could look like this:
 
 .. code-block:: c
 
@@ -314,6 +312,62 @@ without ``CFG_WITH_PAGER``. Our fictive gendev could look like this:
 Note that parts of the DDR typically will need to be shared with normal world,
 so there is need for some kind of memory firewall for this (more about that
 further down).
+
+.. _porting_memory_layout:
+
+**Memory layout**
+
+The memory layout is set with the following ``conf.mk`` options when
+``platform_config.h`` includes ``mm/generic_ram_layout.h``
+(``core/arch/arm/include/mm/generic_ram_layout.h``). The header file documents
+the resulting layout with and without ``CFG_WITH_PAGER``.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 25 45
+
+   * - ``conf.mk`` option
+     - Resulting macros
+     - Description
+   * - ``CFG_TZDRAM_START``, ``CFG_TZDRAM_SIZE`` (mandatory)
+     - ``TZDRAM_BASE``, ``TZDRAM_SIZE``
+     - Secure DRAM used by OP-TEE. Without the pager the TEE core is placed at
+       the start of it. The rest of it is used for TA memory.
+   * - ``CFG_TEE_RAM_VA_SIZE`` (optional)
+     - ``TEE_RAM_VA_SIZE``
+     - Size of the TEE core memory. Defaults to ``CORE_MMU_PGDIR_SIZE``.
+   * - (derived)
+     - ``TEE_RAM_START``, ``TEE_RAM_PH_SIZE``
+     - Start and physical size of the TEE core memory. Without the pager
+       ``TEE_RAM_START`` is ``TZDRAM_BASE`` and ``TEE_RAM_PH_SIZE`` is
+       ``TEE_RAM_VA_SIZE``. With the pager they are ``TZSRAM_BASE`` and
+       ``TZSRAM_SIZE``.
+   * - ``CFG_TEE_LOAD_ADDR`` (optional)
+     - ``TEE_LOAD_ADDR``
+     - Load address of the TEE core. If neither ``CFG_TEE_LOAD_ADDR`` nor the
+       platform defines it, ``core/include/mm/core_mmu.h`` sets it to
+       ``TEE_RAM_START``.
+   * - ``CFG_TZSRAM_START``, ``CFG_TZSRAM_SIZE`` (optional, pager only)
+     - ``TZSRAM_BASE``, ``TZSRAM_SIZE``
+     - On-chip secure SRAM used by the pager. If not set with
+       ``CFG_WITH_PAGER=y``, the SRAM is emulated in the first
+       ``CFG_CORE_TZSRAM_EMUL_SIZE`` bytes (default 448 KiB) of
+       ``CFG_TZDRAM``.
+   * - ``CFG_SHMEM_START``, ``CFG_SHMEM_SIZE`` (mandatory)
+     - ``TEE_SHMEM_START``, ``TEE_SHMEM_SIZE``
+     - Non-secure static shared memory, used when
+       ``CFG_CORE_RESERVED_SHM=y`` (the default). Dynamic shared memory
+       (``CFG_CORE_DYN_SHM=y``, the default) uses the non-secure DDR described
+       with ``register_ddr()`` or the device tree instead.
+
+On Arm, the TA memory does not need a separate definition. The header comment
+of ``generic_ram_layout.h`` still lists ``TA_RAM_START`` and ``TA_RAM_SIZE``,
+but the Arm core does not use them: the part of ``CFG_TZDRAM`` that is not used
+by the TEE core is used as secure memory for TAs.
+
+A platform can also define the layout macros by hand in ``platform_config.h``
+instead of including ``mm/generic_ram_layout.h``. For example
+``plat-poplar``, ``plat-sprd``, ``plat-ti`` and ``plat-zynq7k`` do so.
 
 **sub.mk**
 

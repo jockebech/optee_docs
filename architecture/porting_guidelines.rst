@@ -308,22 +308,18 @@ a new ``*.mk`` in :ref:`build`) for the device you have added to OP-TEE.
 
 Vendor platform code
 ********************
-Vendor ports of OP-TEE are usually written to make bring-up work, not to pass a
-security review. They are often copied from a reference board that has a
-different threat model, written once and then rarely maintained after the SoC
-has launched. On top of that, security critical configuration is spread across
-many components, for example TF-A, U-Boot, OP-TEE, the device tree and fuses.
+A port of OP-TEE to a new SoC or board can contain code and configuration
+provided by the vendor. Security critical configuration is spread across several
+components, for example TF-A, U-Boot, OP-TEE, the device tree and fuses.
 
-OP-TEE upstream has a ``CFG_INSECURE`` switch (formerly ``CFG_WARN_INSECURE``)
-which, when enabled, permits development-only configurations and prints a
-message at boot indicating that the device runs a standard developer
-configuration. Several platforms also use it to gate security checks (for
-example the TZASC checks on i.MX). A vendor port may keep ``CFG_INSECURE=y`` or
-silence warnings instead of fixing the underlying problem.
+OP-TEE has a ``CFG_INSECURE`` switch (formerly ``CFG_WARN_INSECURE``). When it
+is enabled, OP-TEE permits development-only configurations and prints a message
+at boot indicating that the device runs a standard developer configuration.
+Several platforms use it to gate security checks, for example the TZASC checks
+on i.MX. When ``CFG_INSECURE=y`` those checks are disabled.
 
-Treat the vendor port as a starting point, not a finished product, and verify
-every security relevant setting yourself. A port that boots and passes
-``xtest`` is **not** automatically secure.
+A device that boots and passes ``xtest`` can still have security features
+disabled. The following sections describe the security relevant parts of a port.
 
 .. _hardware_unique_key:
 
@@ -346,24 +342,24 @@ But, remember it is not good secure practice to store a key in software,
 especially not the key that is the root for everything else, so this is not
 something we recommend that you should do.
 
-The HUK must be both **unique per device** and **secret**. A common porting
-mistake is to derive the HUK from a value that is readable by the normal world,
-for example a chip ID, an SoC serial number or a MAC address, possibly combined
-with a fixed salt. Such a value is not secret, so every device that shares the
-same input ends up with the same HUK. A related mistake is to read the HUK from
-fuses or OTP regions that are also mapped as non-secure and therefore readable
-from Linux. Because the HUK is the root from which secure storage keys, TA keys
-and the RPMB key are derived, a leaked or shared HUK compromises those secrets
-for the whole fleet, not just for a single device.
+The HUK must be unique per device and secret. If the HUK is derived from a value
+that is readable by the normal world, for example a chip ID, an SoC serial
+number or a MAC address, possibly combined with a fixed salt, then the value is
+not secret and every device that shares the same input has the same HUK. If the
+HUK is read from fuses or OTP regions that are also mapped as non-secure, it is
+readable from the normal world. The HUK is the root from which secure storage
+keys, TA keys and the RPMB key are derived, so a HUK that is known or shared
+compromises those secrets on all devices that share it.
 
-When implementing ``tee_otp_get_hw_unique_key()``:
+The platform implementation of ``tee_otp_get_hw_unique_key()`` must:
 
-- Use a true per-device secret, ideally one that never leaves the SoC, such as a
-  key protected by a crypto accelerator or a secure-only OTP/eFuse region.
-- Make sure the read path is accessible only from the secure world, and that the
-  value does not change depending on the security state in a way that breaks
-  key derivation (see the RPMB key discussion below and :ref:`secure_storage`).
-- Never fall back to a fixed or all-zero key in a production build.
+- Return a per-device secret that is not readable outside the secure world, for
+  example a key protected by a crypto accelerator or a secure-only OTP/eFuse
+  region.
+- Expose the read path only to the secure world, and keep the value independent
+  of the security state in a way that does not break key derivation (see the
+  RPMB key discussion below and :ref:`secure_storage`).
+- Not fall back to a fixed or all-zero key in a production build.
 
 .. _porting_secure_storage:
 
@@ -372,22 +368,17 @@ Secure storage and rollback protection
 OP-TEE can store Trusted Application data either in the normal world file
 system (``CFG_REE_FS=y``, the default) or in the Replay Protected Memory Block
 (RPMB) partition of an eMMC device (``CFG_RPMB_FS=y``). The REE file system
-encrypts and integrity protects the blobs, but it does **not** protect against
+encrypts and integrity protects the blobs, but it does not protect against
 rollback: an attacker with write access to the normal world file system can
-restore an old snapshot of the storage, and OP-TEE will accept old counters,
-old credentials and old anti-rollback state. Rollback protection is only
-provided by RPMB.
+restore an old snapshot of the storage, and OP-TEE then sees old counters, old
+credentials and old anti-rollback state. Rollback protection is provided by
+RPMB.
 
-For a production device:
-
-- Enable ``CFG_RPMB_FS`` and make sure the RPMB key is derived from a unique,
-  secret HUK (see :ref:`hardware_unique_key`).
-- Verify rollback protection on real hardware. The emulated RPMB device provided
-  by ``tee-supplicant`` starts from scratch on every boot and does not exercise
-  the real eMMC behavior.
-- Keep in mind that ``CFG_RPMB_FS_DEV_ID`` selects which MMC device is used, and
-  that the device probe order may differ between the boot loader, the kernel and
-  OP-TEE.
+The RPMB key is derived from the HUK (see :ref:`hardware_unique_key`). The
+emulated RPMB device provided by ``tee-supplicant`` starts from scratch on every
+boot and does not exercise the real eMMC behavior. ``CFG_RPMB_FS_DEV_ID``
+selects which MMC device is used, and the device probe order can differ between
+the boot loader, the kernel and OP-TEE.
 
 See :ref:`secure_storage` for the details of both implementations.
 
@@ -395,23 +386,21 @@ See :ref:`secure_storage` for the details of both implementations.
 
 RPMB key provisioning
 *********************
-The RPMB key is a one-time-programmable key, so mistakes here cannot be undone
-on a device. In particular:
+The RPMB key is programmed once and cannot be changed afterwards.
 
-- Never use the built-in test key (``CFG_RPMB_TESTKEY=y``) in production; the
-  key is public and identical on every device.
-- Derive the key from a per-device secret (``CFG_RPMB_TESTKEY=n``), typically
-  the HUK. A non-unique HUK leads to the same RPMB key on all devices.
-- Do not let the rich OS program the key. Program it once from the secure world
-  and disable ``CFG_RPMB_WRITE_KEY`` afterwards.
-- Do not leave the key write unlocked, otherwise an attacker can provision a key
-  on a fresh device and take over the RPMB partition.
-- Make sure the correct eMMC device is selected (``CFG_RPMB_FS_DEV_ID``, or the
-  ``--rpmb-cid`` argument when provisioning). If the wrong device is chosen, or
-  the key is programmed before the board is secured, subsequent RPMB accesses
-  will fail.
-- Use the ``plat_rpmb_key_is_ready()`` hook to enforce that provisioning only
-  happens in a safe state.
+- ``CFG_RPMB_TESTKEY=y`` embeds a public key that is identical on all devices.
+- With ``CFG_RPMB_TESTKEY=n`` the key is derived from a per-device secret,
+  typically the HUK. If the HUK is not unique, the derived RPMB key is not
+  unique either.
+- ``CFG_RPMB_WRITE_KEY`` lets the normal world relay the key programming
+  request to the eMMC device, so the key is present in the normal world.
+- If the key write is left unlocked, a key can be provisioned on a fresh device
+  by anyone who can run the programming tool.
+- ``CFG_RPMB_FS_DEV_ID`` selects which MMC device is used, and ``--rpmb-cid``
+  selects the device when provisioning. If the wrong device is chosen, or the
+  key is programmed before the board is secured, subsequent RPMB accesses fail.
+- ``plat_rpmb_key_is_ready()`` controls whether OP-TEE is allowed to program the
+  key at runtime.
 
 See :ref:`rpmb` for the full description.
 
@@ -457,15 +446,15 @@ to abstract the chain of trust (see auth-framework.rst_).
 We have successfully verified OP-TEE by using the authentication framework from
 Trusted Firmware A (see :ref:`secure_boot` for the details).
 
-A chain of trust is more than verifying signatures, it also includes
-anti-rollback protection. Without rollback counters, an attacker who can write
-the boot medium can flash an old, known-vulnerable OP-TEE or TF-A image that is
-still correctly signed. Store the counters in RPMB or in fuses and make sure
-every boot stage checks and updates them. Also make sure the secure boot fuse is
-actually burned in production units; a recurring mistake is to enable secure
-boot in software but leave the fuse open, or to sign with a debug/development
-key instead of the production key. Verify the full chain from the boot ROM,
-through TF-A and OP-TEE, to the TAs with production keys before shipping.
+Anti-rollback protection is part of a chain of trust. Without rollback
+counters, an attacker who can write the boot medium can flash an old,
+known-vulnerable OP-TEE or TF-A image that is still correctly signed. The
+counters can be stored in RPMB or in fuses, and each boot stage can check and
+update them. If secure boot is enabled in software but the corresponding fuse is
+left open, or if the images are signed with a debug key instead of the
+production key, the chain of trust does not hold. The full chain, from the boot
+ROM through TF-A and OP-TEE to the TAs, is signed and verified with production
+keys.
 
 Hardware Crypto IP
 ******************
@@ -498,42 +487,36 @@ When ``CFG_WITH_SOFTWARE_PRNG=n``, the random number generator is made
 available to OP-TEE drivers and frameworks, including Trusted Applications
 (through GP TEE Internal Core API) and normal world (when ``CFG_HWRNG_PTA=y``).
 
-Make sure the hardware TRNG is reserved for the secure world. If the same TRNG
-is shared with Linux without arbitration, the normal world can influence or
-observe the entropy going into the secure world. Do not leave the TRNG
-unconfigured and silently fall back to the software PRNG: a platform that has a
-TRNG but has not ported or enabled the driver (``CFG_HWRNG_PTA`` and the
-platform ``hw_get_random_bytes()`` implementation) behaves exactly like a
-platform without one. Validate the output, for example with the NIST statistical
-test suite, before you trust it.
+If the same TRNG is shared with Linux without arbitration, the normal world can
+influence or observe the entropy that goes into the secure world. A platform
+that has a TRNG but has not ported or enabled the driver (``CFG_HWRNG_PTA`` and
+the platform ``hw_get_random_bytes()`` implementation) falls back to the
+software PRNG. TRNG output can be validated with a statistical test suite such
+as the NIST suite.
 
 .. _porting_production_build:
 
 Production build configuration
 ******************************
-A development build of OP-TEE is convenient during bring-up but is not suitable
-for a product. Before shipping, review the configuration and make sure
-development-only settings are disabled:
+The default OP-TEE configuration is a development configuration. The following
+options affect security and have defaults or common development settings that
+differ from a production configuration:
 
-- ``CFG_INSECURE=y`` (the default) indicates a development configuration. In a
-  production build it should be ``n``, which also enables platform security
-  checks such as the TZASC checks on i.MX.
-- ``CFG_TEE_CORE_DEBUG``, ``DEBUG=1``, a high ``CFG_TEE_CORE_LOG_LEVEL`` and
-  panic dumps leak internal state over the console.
-- ``CFG_UNWIND`` and ``CFG_DEBUG_INFO`` leak addresses and call stacks.
-- ``CFG_RPMB_TESTKEY`` must not be enabled (see
+- ``CFG_INSECURE`` defaults to ``y``. With ``CFG_INSECURE=n`` several platform
+  security checks are enabled, for example the TZASC checks on i.MX.
+- ``CFG_TEE_CORE_DEBUG`` defaults to ``y``; ``DEBUG=1`` disables optimization
+  and forces ``CFG_DEBUG_INFO=y``. Together with ``CFG_TEE_CORE_LOG_LEVEL`` they
+  control how much internal state is printed on the console.
+- ``CFG_UNWIND`` and ``CFG_DEBUG_INFO`` make call stack and address information
+  available.
+- ``CFG_RPMB_TESTKEY`` embeds a public test key (see
   :ref:`porting_rpmb_provisioning`).
-- ``CFG_CORE_ASLR`` and the ``CFG_CORE_WORKAROUND_SPECTRE_BP`` family of options
-  are security features that should remain enabled rather than being disabled
-  "to save time" during bring-up. On Armv8-A ``CFG_CORE_WORKAROUND_SPECTRE_BP``
-  is enabled by default, do not turn it off.
-- ``CFG_WITH_PAGER`` is disabled by default and requires SRAM support. Decide
-  deliberately whether your product needs it instead of disabling it because
-  bring-up was easier that way.
+- ``CFG_CORE_ASLR`` defaults to ``y``. The ``CFG_CORE_WORKAROUND_SPECTRE_BP``
+  family is enabled by default on Armv8-A.
+- ``CFG_WITH_PAGER`` defaults to ``n`` and requires SRAM support.
 
-These settings tend to drift while debugging, so keep a separate hardened
-production configuration and diff it against the development configuration in
-CI.
+A production configuration can be kept separately and compared with the
+development configuration, for example in CI.
 
 Power Management / PSCI
 ***********************
@@ -559,13 +542,11 @@ return. In a real production device, you would probably want to save and restore
 CPU states, secure hardware IPs' registers and TZASC and other memory firewall
 related setting when these callbacks are being called.
 
-Also test the security configuration after every power transition, not only
-after a cold boot. A common failure mode is that TZASC and bus firewall
-configuration is lost on suspend-to-RAM and not restored on resume, or that
-secondary cores are brought up without the secure configuration applied. Secure
-SRAM/OCRAM used for stacks or keys must be cleared (or otherwise protected)
-across low-power states. Run your negative isolation tests again after
-suspend/resume and after CPU hotplug cycles.
+The TZASC and bus firewall configuration can be lost on suspend-to-RAM and is
+then not restored on resume. Secondary cores can be brought up without the
+secure configuration applied. Secure SRAM/OCRAM that holds stacks or keys can be
+left readable across low-power states if it is not cleared or protected. These
+paths are not covered by a cold boot test.
 
 Memory firewalls / TZASC
 ************************
@@ -587,20 +568,22 @@ device has such that it has a secure and a non-secure memory area.
 
 Non-CPU bus masters
 *******************
-A memory firewall such as TZASC only filters transactions from the CPU and some
-bus masters. DMA engines, display controllers, video decoders, GPUs, Cortex-M
-cores and other non-CPU masters may have their own secure/non-secure attributes
-configured elsewhere, and can therefore still read or write secure DRAM even
-when TZASC is configured correctly. A missing or misconfigured SMMU/IOMMU makes
-this worse, and disabling it for performance is a common mistake.
+A memory firewall such as TZASC filters transactions from the CPU and some bus
+masters. DMA engines, display controllers, video decoders, GPUs, Cortex-M cores
+and other non-CPU masters can have their own secure/non-secure attributes
+configured in the SoC interconnect. If these attributes are not configured,
+such a master can read or write secure DRAM even when TZASC is configured
+correctly. An SMMU/IOMMU that is not configured, or that is bypassed, does not
+restrict DMA to the secure regions.
 
-Audit every bus master that can reach secure memory:
+The relevant checks are:
 
-- Check the secure/non-secure attribute of each master in the SoC interconnect
-  or bus firewall (CSU, RDC/XRDC/TRDC, AIPSTZ or equivalent).
-- Configure the SMMU/IOMMU, or otherwise block DMA to the secure regions.
-- Verify from the normal world that a DMA-capable peripheral cannot read a known
-  secure buffer.
+- The secure/non-secure attribute of each master in the SoC interconnect or bus
+  firewall (CSU, RDC/XRDC/TRDC, AIPSTZ or equivalent).
+- The SMMU/IOMMU configuration, or an equivalent way to block DMA to the secure
+  regions.
+- Whether a DMA-capable peripheral can read a known secure buffer from the
+  normal world.
 
 .. _memory_aliases:
 
@@ -621,43 +604,37 @@ the DDR controller ignores address bit 32, so e.g. ``0xbe000000`` and
 ``0x1be000000`` alias the same OP-TEE core memory, and a region 0 reopened by
 U-Boot allowed the alias to escape (see :ref:`nxp`).
 
-Because of this:
+The firmware that runs before OP-TEE configures region 0. On some platforms
+OP-TEE can verify this with ``CFG_TZASC_REGION0_SECURE``, which makes OP-TEE
+panic if region 0 is not secure. Whether the SoC has memory aliasing can be
+tested by mapping high address bits of a known secure address from the normal
+world and comparing the contents.
 
-- Make sure the firmware that runs before OP-TEE leaves region 0 secure and does
-  not reconfigure it later. On some platforms OP-TEE can enforce this with
-  ``CFG_TZASC_REGION0_SECURE``, which makes OP-TEE panic if region 0 is not
-  secure.
-- Check whether the SoC has memory aliasing, and test for it. A simple
-  experiment is to map high address bits of a known secure address from the
-  normal world and compare the contents.
-- Remember that "Linux refused the access" is not proof of isolation. A read
-  through ``/dev/mem`` may be blocked by ``CONFIG_STRICT_DEVMEM``, or the region
-  may be covered by a ``no-map`` reserved memory node, before TrustZone is even
-  involved. An attacker can bypass both, so verify that the secure memory itself
-  is inaccessible, not merely that one interface said no.
+A read through ``/dev/mem`` can be blocked by ``CONFIG_STRICT_DEVMEM``, or the
+region can be covered by a ``no-map`` reserved memory node, before TrustZone is
+involved. A denied access through such a path does not by itself demonstrate
+that the secure memory is protected.
 
 .. _secure_peripherals:
 
 Secure peripheral ownership
 ***************************
-Peripherals that are meant only for the secure world, such as crypto
-accelerators, the TRNG, fuse controllers and secure timers, must not be
-accessible from the normal world. If they are mapped as non-secure, Linux
-drivers can read or write them and interfere with the OP-TEE drivers that use
-the same hardware.
+Peripherals that are used by the secure world, such as crypto accelerators, the
+TRNG, fuse controllers and secure timers, can be accessed by the normal world if
+they are mapped as non-secure. Linux drivers for the same peripherals can then
+read or write them and interfere with the OP-TEE drivers that use the same
+hardware.
 
 Secure interrupts are normally delivered as GIC Group 0 (FIQ). If the interrupt
 configuration is wrong, the normal world can handle or mask interrupts that
 belong to the secure world.
 
-Before shipping:
-
-- Define peripheral ownership explicitly and enforce it with the SoC bus
-  firewall (CSU, RDC/XRDC/TRDC, AIPSTZ or equivalent).
-- Remove device tree nodes and Linux drivers for peripherals that belong to the
-  secure world, so the two worlds cannot fight over the same device.
-- Check the secure interrupt configuration and make sure secure interrupts
-  cannot be handled or masked by the non-secure side.
+The ownership of each peripheral is defined by the SoC bus firewall (CSU,
+RDC/XRDC/TRDC, AIPSTZ or equivalent). Device tree nodes and Linux drivers for
+peripherals that belong to the secure world can be removed so that the two
+worlds do not access the same device. The secure interrupt configuration
+determines whether secure interrupts can be handled or masked by the non-secure
+side.
 
 .. _core_pub_priv_keypair:
 
@@ -681,38 +658,38 @@ happen has not been decided yet.
 
 Debug interfaces
 ****************
-Debug features that are useful during development must be disabled before
-shipping:
+The following debug features affect the secure world:
 
-- JTAG/SWD access to the secure world, including CoreSight/ETM trace, should be
-  disabled with fuses or an authenticated debug unlock mechanism.
-- Secure UART consoles must not print TEE logs, assertions or panic information
-  in production.
-- Vendor "debug mode" fuse bits must actually be programmed on shipped boards,
-  not only on development units.
+- JTAG/SWD access to the secure world, including CoreSight/ETM trace, can be
+  controlled with fuses or an authenticated debug unlock mechanism.
+- A secure UART console prints TEE logs, assertions and panic information.
+- "Debug mode" fuse bits are programmed on development units and can remain
+  programmed on shipped boards.
 
-If field debugging is required, implement an authenticated debug unlock rather
-than leaving the interface open.
+An authenticated debug unlock mechanism provides field debugging without
+leaving the interface permanently open.
 
 .. _ree_tee_interface:
 
 REE/TEE interface
 *****************
 The SMC/PTA interface between the normal world and OP-TEE is part of the attack
-surface. Bugs there can let an unprivileged Linux process reach privileged
-operations.
+surface. A bug in a platform specific handler can let a normal world process
+reach an operation that is otherwise privileged. The parts of the interface to
+check are:
 
-- Validate every parameter of platform specific SMC handlers in TF-A and in
-  OP-TEE: addresses, sizes, identifiers and parameter types.
-- Check shared memory buffers against the secure and non-secure memory maps
-  (``core_pbuf_is()``) instead of trusting the caller. A missing check can let
-  the normal world point OP-TEE at secure memory.
-- Get cache maintenance and coherency right on shared buffers; mistakes lead to
-  data corruption or stale reads.
-- Keep vendor added SMC and PTA services minimal. Every extra service that
-  exposes a privileged operation to any Linux process is a potential privilege
-  escalation.
-- Fuzz the interface before shipping.
+- The validation of parameters of platform specific SMC handlers in TF-A and
+  OP-TEE, such as addresses, sizes, identifiers and parameter types, which are
+  inputs from the normal world.
+- The check of shared memory buffers against the secure and non-secure memory
+  maps (``core_pbuf_is()``). Without such a check the normal world can point
+  OP-TEE at secure memory.
+- Cache maintenance and coherency on shared buffers, which affects whether
+  OP-TEE reads stale data or returns corrupted data.
+- Vendor added SMC and PTA services that expose operations to the normal world.
+  Each service that reaches a privileged operation is reachable by any process
+  that can issue the call.
+- Fuzzing of the interface.
 
 .. _platform_ports:
 
@@ -739,8 +716,7 @@ their products on. Refer also to :ref:`platform_documentation`
 
 Security porting checklist
 **************************
-The following checklist summarizes the topics in this document. Treat the
-vendor port as a starting point, not a finished product.
+The following checklist summarizes the topics in this document.
 
 - HUK: unique per device and secret, not derived from a world-readable value.
 - Memory: TZASC/firewalls configured and locked, including non-CPU bus masters
@@ -755,13 +731,11 @@ vendor port as a starting point, not a finished product.
 - Secure boot: full chain of trust with production keys and anti-rollback
   counters.
 - Debug: JTAG/SWD, trace and secure console locked down in production.
-- Interface: platform SMC/PTA services reviewed, parameter checks in place and
-  fuzzed.
+- Interface: platform SMC/PTA services reviewed and parameter checks in place.
 - Power: security configuration restored after suspend/resume and on secondary
   cores.
-- Process: diff production and development configurations, run negative tests
-  from the normal world (``/dev/mem``, DMA, fuse reads) and involve a security
-  review before the first production fuse is burned.
+- Process: production and development configurations compared, and negative
+  tests from the normal world (``/dev/mem``, DMA, fuse reads) run.
 
 
 .. _core/arch/arm/plat-hikey/conf.mk: https://github.com/OP-TEE/optee_os/blob/master/core/arch/arm/plat-hikey/conf.mk

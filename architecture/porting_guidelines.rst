@@ -516,18 +516,21 @@ disabled. The following sections describe the security relevant parts of a port.
 Memory firewalls / TZASC
 ========================
 Arm have defined a system IP / SoC peripheral called TrustZone Address Space
-Controller (TZASC, see TZC-380_ and TZC-400_). TZASC can be used to configure
-DDR memory into separate regions in the physical address space, where each
-region can have an individual security level setting. After enabling TZASC, it
-will perform security checks on transactions to memory or peripherals. It is not
-always the case that TZASC is on a device, in some cases the SoC has developed
-something equivalent. In OP-TEE this is very well reflected, i.e., different
-platforms have different ways of protecting their memory. On ARMv8-A platforms
-we are in most of the cases using Trusted Firmware A as the boot firmware and
-there the secure bootloader is the one that configures secure vs non-secure
-memory using TZASC (see plat_arm_security_setup_ in TF-A). The takeaway here is
-that you must make sure that you have configured whatever memory firewall your
-device has such that it has a secure and a non-secure memory area.
+Controller (TZASC), for example the TZC-380 and the TZC-400, described in the
+Arm Technical Reference Manuals with document numbers DDI 0431 and DDI 0504.
+TZASC can be used to configure DDR memory into separate regions in the physical
+address space, where each region can have an individual security level setting.
+After enabling TZASC, it will perform security checks on transactions to memory
+or peripherals. It is not always the case that TZASC is on a device, in some
+cases the SoC has developed something equivalent. In OP-TEE this is very well
+reflected, i.e., different platforms have different ways of protecting their
+memory. On ARMv8-A platforms we are in most of the cases using Trusted Firmware
+A as the boot firmware and there the secure bootloader is the one that
+configures secure vs non-secure memory using TZASC (see
+``plat_arm_security_setup()`` in TF-A, for example in fvp_security.c_). The
+takeaway here is that you must make sure that you have configured whatever
+memory firewall your device has such that it has a secure and a non-secure
+memory area.
 
 .. _memory_aliases:
 
@@ -989,10 +992,8 @@ The following checklist summarizes the topics in :ref:`porting_production`.
 .. _core/include/kernel/tee_common_otp.h: https://github.com/OP-TEE/optee_os/blob/master/core/include/kernel/tee_common_otp.h
 
 
-.. _auth-framework.rst: https://github.com/ARM-software/arm-trusted-firmware/blob/master/docs/design/auth-framework.rst
+.. _auth-framework.rst: https://trustedfirmware-a.readthedocs.io/en/latest/design/auth-framework.html
 .. _HSM: https://en.wikipedia.org/wiki/Hardware_security_module
 .. _MAINTAINERS: https://github.com/OP-TEE/optee_os/blob/master/MAINTAINERS
 .. _OTP: https://en.wikipedia.org/wiki/Programmable_read-only_memory
-.. _plat_arm_security_setup: https://github.com/ARM-software/arm-trusted-firmware/search?utf8=%E2%9C%93&q=plat_arm_security_setup&type=
-.. _TZC-380: http://infocenter.arm.com/help/index.jsp?topic=/com.arm.doc.ddi0431c/index.html
-.. _TZC-400: http://infocenter.arm.com/help/index.jsp?topic=/com.arm.doc.100325_0001_02_en/index.html
+.. _fvp_security.c: https://github.com/TrustedFirmware-A/trusted-firmware-a/blob/main/plat/arm/board/fvp/fvp_security.c

@@ -132,6 +132,9 @@ secure memory and static shared memory locations:
     CFG_NUM_THREADS ?= 4
     CFG_CRYPTO_WITH_CE ?= y
 
+    # Platform specific option: UART instance used as secure console
+    CFG_CONSOLE_UART ?= 0
+
     # Secure memory used by OP-TEE (TEE core and TA RAM)
     CFG_TZDRAM_START ?= 0x60000000
     CFG_TZDRAM_SIZE ?= 0x02000000
@@ -144,6 +147,23 @@ secure memory and static shared memory locations:
 ``CFG_TZDRAM_START``, ``CFG_TZDRAM_SIZE``, ``CFG_SHMEM_START`` and
 ``CFG_SHMEM_SIZE`` are mandatory when ``platform_config.h`` includes
 ``mm/generic_ram_layout.h`` (see below).
+
+The console driver is selected with a driver option. ``core/drivers/sub.mk``
+lists the UART drivers, for example ``CFG_PL011``, ``CFG_8250_UART``,
+``CFG_16550_UART``, ``CFG_CDNS_UART``, ``CFG_IMX_UART`` and ``CFG_STM32_UART``.
+
+A platform can also define its own configuration options. ``CFG_CONSOLE_UART``
+in the example is such an option: it is not defined in ``mk/config.mk``, and
+the platform's ``platform_config.h`` uses it to select the base address of the
+UART that is used as console. ``plat-hikey``, ``plat-k3`` and ``plat-versal2``
+use this pattern. In the same way ``plat-hikey`` and ``plat-poplar`` define
+``CFG_DRAM_SIZE_GB`` to select the DRAM size of the board variant.
+
+Some options do not have to be set in the platform ``conf.mk``:
+``CFG_WITH_LPAE`` is forced to ``y`` for 64-bit cores in
+``core/arch/arm/arm.mk``, ``arm.mk`` derives the TA targets (``ta_arm32``,
+``ta_arm64``) from the core architecture unless the platform sets
+``supported-ta-targets``, and ``CFG_WITH_STACK_CANARIES`` defaults to ``y``.
 
 **main.c**
 
@@ -227,7 +247,17 @@ without ``CFG_WITH_PAGER``. Our fictive gendev could look like this:
     #define STACK_ALIGNMENT		64
 
     /* 8250 UART */
-    #define CONSOLE_UART_BASE	0xcafebabe /* UART0 */
+    #define UART0_BASE		0xcafe0000
+    #define UART1_BASE		0xcafe1000
+
+    #if (CFG_CONSOLE_UART == 0)
+    #define CONSOLE_UART_BASE	UART0_BASE
+    #elif (CFG_CONSOLE_UART == 1)
+    #define CONSOLE_UART_BASE	UART1_BASE
+    #else
+    #error Unknown console UART
+    #endif
+
     #define CONSOLE_BAUDRATE	115200
     #define CONSOLE_UART_CLK_IN_HZ	19200000
 
@@ -253,6 +283,30 @@ This file lists the source files of the platform and the include directories:
 
     global-incdirs-y += .
     srcs-y += main.c
+
+.. _porting_console:
+
+Console
+-------
+The secure console is the first thing to get working on a new device, since
+the boot log, ``EMSG()``/``IMSG()`` output and abort and panic dumps (see
+:ref:`abort_dumps`) are printed on it.
+
+- ``console_init()`` in ``core/kernel/console.c`` calls ``plat_console_init()``
+  early during boot. The weak default does nothing, so without a platform
+  implementation OP-TEE runs without console output. ``CFG_SEMIHOSTING_CONSOLE``
+  and ``CFG_FFA_CONSOLE`` select other console backends instead of
+  ``plat_console_init()``.
+- The console UART must be mapped with ``register_phys_mem_pgdir()``, see
+  ``main.c`` above.
+- With ``CFG_DT=y``, ``configure_console_from_dt()`` runs later during boot.
+  It reads ``stdout-path`` from the ``/secure-chosen`` node, or from
+  ``/chosen`` if there is no ``/secure-chosen`` node, and switches the console
+  to that UART if a matching driver is enabled. If the node exists but has no
+  ``stdout-path`` property, OP-TEE prints ``Switching off console`` and turns
+  the console off.
+- ``CFG_TEE_CORE_LOG_LEVEL`` (default ``2``) selects how much is printed (see
+  :ref:`porting_production_build`).
 
 .. _porting_binaries:
 

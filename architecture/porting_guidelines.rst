@@ -225,6 +225,46 @@ OP-TEE accepts the parts of it that do not overlap with secure memory as
 non-secure shared memory. As an alternative, the memory can be described by
 the device tree that is passed to OP-TEE (see :ref:`device_tree`).
 
+**Entry points and handlers**
+
+The SMC, interrupt and power management entry points of OP-TEE are
+implemented in the core. A platform does not register a handler table.
+Instead it overrides weak functions when it needs platform specific
+behavior:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 75
+
+   * - Event
+     - Handled by
+   * - Standard (yielding) SMC
+     - ``tee_entry_std()`` in ``core/tee/entry_std.c``. It is weak, and an
+       override is expected to call ``__tee_entry_std()`` for the functions it
+       does not handle.
+   * - Fast SMC
+     - ``tee_entry_fast()`` in ``core/arch/arm/tee/entry_fast.c``. It is weak to
+       let platforms add special handling. An override handles its platform
+       specific function IDs and calls ``__tee_entry_fast()`` for the others,
+       see for example ``core/arch/arm/plat-zynq7k/main.c``.
+   * - Secure (native) interrupt
+     - ``interrupt_main_handler()``. The interrupt controller driver provides
+       it, for example ``core/drivers/gic.c`` with ``CFG_GIC=y``. The weak
+       default in ``core/kernel/interrupt.c`` panics with ``Secure interrupt
+       handler not defined``. Drivers register handlers for individual
+       interrupts with ``interrupt_add_handler()`` and related functions (see
+       :ref:`interrupt_handling`). ``CFG_CORE_IRQ_IS_NATIVE_INTR`` (default
+       ``n``) selects whether native interrupts are signaled as FIQ or IRQ.
+   * - CPU on, off, suspend, resume, system off and reset
+     - See :ref:`porting_power_management`.
+   * - SMC handled in the secure monitor (``CFG_WITH_ARM_TRUSTED_FW=n``)
+     - ``sm_platform_handler()`` in ``core/arch/arm/sm/sm.c``, called when
+       ``CFG_SM_PLATFORM_HANDLER=y``. The weak default returns
+       ``SM_HANDLER_PENDING_SMC`` so that the SMC is passed on to OP-TEE.
+
+Platform specific SMC functions are reachable from the normal world, see
+:ref:`ree_tee_interface`.
+
 **platform_config.h**
 
 This is a mandatory header file for every platform, since there are several

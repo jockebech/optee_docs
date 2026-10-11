@@ -27,6 +27,40 @@ Part 1: Porting OP-TEE to a new device
 This part describes how to add support for a new device to OP-TEE and how
 to get it up and running.
 
+.. _porting_boot_flow:
+
+Boot flow and prerequisites
+===========================
+Before adding a platform it is useful to know how OP-TEE will be loaded and
+how it communicates with the normal world on the device. The combinations
+supported by OP-TEE are:
+
+- **With Trusted Firmware A** (``CFG_WITH_ARM_TRUSTED_FW=y``). OP-TEE is the
+  BL32 image loaded by TF-A, and TF-A runs the secure monitor at EL3. TF-A is
+  built with ``SPD=opteed`` for the OP-TEE SMC ABI.
+- **With FF-A**. OP-TEE runs as a Secure Partition Manager Core at S-EL1
+  (``CFG_CORE_SEL1_SPMC=y``, TF-A built with ``SPD=spmd`` and
+  ``SPMD_SPM_AT_SEL2=0``), as a secure partition under an SPMC at S-EL2 such as
+  Hafnium (``CFG_CORE_SEL2_SPMC=y``), or together with the TF-A EL3 SPMC
+  (``CFG_CORE_EL3_SPMC=y``). See :doc:`spmc`.
+- **Without Trusted Firmware A** on Armv7-A (``CFG_WITH_ARM_TRUSTED_FW=n``).
+  OP-TEE contains the secure monitor and implements PSCI itself (see
+  :ref:`porting_power_management`).
+
+``boot_save_args()`` in ``core/arch/arm/kernel/boot.c`` documents the boot
+arguments that OP-TEE expects in each of these cases. For example, when OP-TEE
+is not an SPMC at S-EL2, the third argument holds the address of the system
+device tree if it is non-zero. The binaries that the boot loader loads are
+described in :ref:`porting_binaries`.
+
+Things to have at hand before starting:
+
+- The memory map of the device: where secure DRAM (and SRAM) for OP-TEE is
+  placed, where non-secure DRAM is, and the base addresses of the console UART
+  and the interrupt controller.
+- The boot loader configuration that loads OP-TEE, and how it configures the
+  memory firewall (see :ref:`porting_production`).
+
 .. _add_a_new_platform:
 
 Add a new platform
@@ -220,6 +254,8 @@ This file lists the source files of the platform and the include directories:
     global-incdirs-y += .
     srcs-y += main.c
 
+.. _porting_binaries:
+
 Binaries
 --------
 Building OP-TEE results in a few binaries in the out directory.  Which
@@ -280,6 +316,8 @@ given cryptographic operations in OP-TEE core crypto API. Our
 :ref:`cryptographic_implementation` page describes in detail how the Crypto API
 is integrated.
 
+.. _porting_power_management:
+
 Power Management / PSCI
 =======================
 How power management requests reach OP-TEE depends on whether OP-TEE runs
@@ -306,6 +344,58 @@ default handlers do not call ``pm_change_state()``, so a platform that wants
 the registered callbacks to run calls it from its own handlers. Examples are
 ``core/arch/arm/plat-stm32mp2/stm32mp_pm.c`` and
 ``core/drivers/pm/sam/at91_pm.c``.
+
+.. _porting_device_tree:
+
+Device tree
+===========
+OP-TEE can use a device tree in two ways, both enabled with ``CFG_DT=y``
+(default ``n``):
+
+- An external device tree passed by the boot loader (``CFG_EXTERNAL_DT``,
+  which defaults to ``CFG_DT``). OP-TEE adds nodes for the normal world to it,
+  for example a ``firmware/optee`` node with ``compatible = "linaro,optee-tz"``
+  and ``method = "smc"`` when ``CFG_CORE_FFA=n``, and ``reserved-memory`` nodes
+  for the secure memory and the static shared memory.
+- An embedded device tree describing the secure hardware, compiled into the
+  core when ``CFG_EMBED_DTB_SOURCE_FILE`` names a DTS file in
+  ``core/arch/$(ARCH)/dts``.
+
+``CFG_DT`` is forced to ``y`` when an embedded DTB or an SPMC configuration is
+used. See :ref:`device_tree` for the details.
+
+.. _porting_normal_world:
+
+Normal world integration
+========================
+The normal world side of OP-TEE consists of:
+
+- The OP-TEE driver in the Linux kernel (``CONFIG_OPTEE``, see
+  :ref:`linux_kernel`). Without FF-A it finds OP-TEE through the
+  ``linaro,optee-tz`` device tree node, which also selects ``smc`` or ``hvc``
+  as the calling method. With FF-A it uses the FF-A transport.
+- ``tee-supplicant`` and ``libteec`` from :ref:`optee_client`.
+  ``tee-supplicant`` loads TAs from the REE file system, by default from
+  ``/lib/optee_armtz``, and serves REE file system requests from OP-TEE. It
+  also serves RPMB requests unless the kernel routes them itself (see
+  ``CFG_RPMB_ANNOUNCE_PROBE_CAP``).
+
+.. _porting_validation:
+
+Validation with xtest
+=====================
+``xtest`` from :ref:`optee_test` runs on the device and tests the OP-TEE core,
+the GlobalPlatform APIs and the normal world integration. It requires the
+OP-TEE driver, a running ``tee-supplicant`` and the test TAs installed in the
+TA load path. See :ref:`optee_test_run_xtest` for how to run it.
+
+Some tests use pseudo TAs from ``core/pta/tests``, which are only built with
+``CFG_TEE_CORE_EMBED_INTERNAL_TESTS=y``. That option defaults to
+``CFG_ENABLE_EMBEDDED_TESTS``, which defaults to ``n``.
+
+``xtest`` validates functionality. It does not test the security properties
+described in :ref:`porting_production`. When OP-TEE aborts or panics, see
+:ref:`abort_dumps` for how to interpret the dump.
 
 .. _official_board_support:
 
@@ -569,7 +659,7 @@ The platform implementation of ``tee_otp_get_hw_unique_key()`` must:
 Trusted Application private/public keypair
 ==========================================
 By default all Trusted Applications (TA's) are signed with the pre-generated
-2048-bit RSA development key (private key). This key is located in the ``keys``
+4096-bit RSA development key (private key). This key is located in the ``keys``
 folder (in the root of optee_os.git) and is named ``default_ta.pem``. This key
 **must** be replaced with your own key and you should **never ever** check-in
 this private key in the source code tree when in use in a real product. The
@@ -577,10 +667,31 @@ recommended way to store private keys is to use some kind of HSM_ (Hardware
 Security Module), but an alternative would be temporary put the private key on a
 computer considered as secure when you are about to sign TA's intended to be
 used in real products. Typically it is only a few number of people having access
-to this type of key in company. The key handling in OP-TEE is currently a bit
-limited since we only support a single key which is used for all TA's. We have
-plans on extending this to make it a bit more flexible. Exactly when that will
-happen has not been decided yet.
+to this type of key in company.
+
+The signing key is selected with ``TA_SIGN_KEY`` (default
+``keys/default_ta.pem``). ``TA_PUBLIC_KEY`` (default ``TA_SIGN_KEY``) selects the
+public key that is embedded in OP-TEE. When TAs are signed with an external
+HSM, ``TA_SIGN_KEY`` can be set to a dummy key and ``TA_PUBLIC_KEY`` to the
+public key of the HSM. TAs can also be verified with subkeys, see
+:ref:`subkeys`.
+
+.. _porting_ta_enc_key:
+
+Trusted Application encryption key
+==================================
+With ``CFG_ENCRYPT_TA=y``, REE file system TAs are encrypted with
+``TA_ENC_KEY`` at build time (see :ref:`ree_fs_ta`). At runtime OP-TEE gets the
+decryption key from ``tee_otp_get_ta_enc_key()``. The weak default
+implementation derives a device specific key from the HUK. The key type
+recorded in the TA header, ``SHDR_ENC_KEY_DEV_SPECIFIC`` or
+``SHDR_ENC_KEY_CLASS_WIDE``, is selected with the ``--enc-key-type`` option of
+``scripts/sign_encrypt.py``. The weak default only supports
+``SHDR_ENC_KEY_DEV_SPECIFIC``.
+
+The default ``TA_ENC_KEY`` in ``ta/link.mk`` is a dummy key derived from the
+all-zero default HUK. ``ta/link.mk`` states that a user of TA encryption needs
+to provide the encryption key and its handling.
 
 .. _porting_rng:
 
@@ -820,6 +931,23 @@ differ from a production configuration:
   ``CFG_CORE_WORKAROUND_NSITR_CACHE_PRIME`` default to ``y`` on Arm.
 - ``CFG_WITH_PAGER`` defaults to ``n`` and requires SRAM.
 
+The following exploit mitigations are configurable. Some of them depend on CPU
+features and toolchain support:
+
+- Enabled by default: ``CFG_CORE_ASLR``, ``CFG_TA_ASLR``,
+  ``CFG_WITH_STACK_CANARIES`` and, on Arm, ``CFG_CORE_RWDATA_NOEXEC``.
+- Disabled by default:
+
+  - ``CFG_CORE_BTI`` and ``CFG_TA_BTI``: Branch Target Identification
+    (Armv8.5). Requires a GCC toolchain built with
+    ``--enable-standard-branch-protection``.
+  - ``CFG_CORE_PAUTH`` and ``CFG_TA_PAUTH``: Pointer Authentication.
+  - ``CFG_MEMTAG``: Memory Tagging Extension (Armv8.5). Not compatible with
+    ``CFG_WITH_PAGER``.
+  - ``CFG_PAN``: Privileged Access Never (Armv8.1, and the ``SUM`` bit on
+    RISC-V).
+  - ``CFG_CORE_RODATA_NOEXEC``: maps read-only data as non-executable.
+
 A production configuration can be kept separately and compared with the
 development configuration, for example in CI.
 
@@ -836,7 +964,9 @@ The following checklist summarizes the topics in :ref:`porting_production`.
 - Peripherals: secure-only peripherals and secure interrupts not reachable from
   the normal world.
 - HUK: unique per device and secret, not derived from a world-readable value.
-- TA signing key: ``default_ta.pem`` replaced by a product key.
+- TA keys: ``default_ta.pem`` replaced by a product key, and with
+  ``CFG_ENCRYPT_TA=y`` a product ``TA_ENC_KEY`` and matching
+  ``tee_otp_get_ta_enc_key()``.
 - RNG: hardware TRNG driver ported, enabled, validated and secure-only.
 - Secure storage: rollback protection through RPMB
   (``CFG_REE_FS_INTEGRITY_RPMB`` or ``CFG_RPMB_FS``) or a platform monotonic
@@ -848,8 +978,8 @@ The following checklist summarizes the topics in :ref:`porting_production`.
   cores.
 - Interface: platform SMC/PTA services reviewed and parameter checks in place.
 - Debug: JTAG/SWD, trace and secure console locked down in production.
-- Build: production configuration without development flags and with
-  ``CFG_INSECURE=n``.
+- Build: production configuration without development flags, with
+  ``CFG_INSECURE=n`` and the exploit mitigations supported by the CPU.
 - Process: production and development configurations compared, and negative
   tests from the normal world (``/dev/mem``, DMA, fuse reads) run.
 

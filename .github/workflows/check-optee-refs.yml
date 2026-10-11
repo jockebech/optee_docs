@@ -1,0 +1,27 @@
+name: 'Check references to optee_os'
+on:
+  push:
+  pull_request:
+  schedule:
+  # optee_os changes can make the documentation stale without any change to
+  # this repository, so also check periodically
+  - cron: "30 01 * * 1"
+
+jobs:
+  check-refs:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout optee_docs
+      uses: actions/checkout@v4
+
+    - name: Checkout optee_os
+      uses: actions/checkout@v4
+      with:
+        repository: OP-TEE/optee_os
+        path: optee_os
+        fetch-depth: 1
+
+    - name: Check configuration options, functions and paths
+      run: |
+        python3 scripts/check_optee_refs.py --optee-os optee_os \
+          architecture/porting_guidelines.rst
